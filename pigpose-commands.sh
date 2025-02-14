@@ -12,3 +12,5 @@ python tools/misc/browse_dataset.py .\configs\animal_2d_keypoint\topdown_heatmap
 # python setup.py install
 # pip install -v -e .
 python tools/misc/browse_dataset.py .\configs\animal_2d_keypoint\topdown_heatmap\pigpose\td-hm_hrnet-w32_8xb64-210e_pigpose-256x256.py --mode transformed
+
+ python tools/train.py .\configs\animal_2d_keypoint\topdown_heatmap\pigpose\td-hm_hrnet-w32_8xb64-210e_pigpose-256x256.py 
