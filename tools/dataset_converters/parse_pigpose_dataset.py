@@ -105,7 +105,7 @@ def create_coco_dataset(file_list, img_root, save_path, start_ann_id=0):
 
         image = {}
         image['id'] = img_id
-        image['file_name'] = os.path.join(img_root, data_anno["imagePath"])
+        image['file_name'] = img_root + '/'+ data_anno["imagePath"]
         image['height'] = data_anno["imageHeight"]
         image['width'] = data_anno["imageWidth"]
 
