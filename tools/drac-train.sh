@@ -55,7 +55,6 @@ MODEL_FILE=$(ls work_dirs/${EXPERIMENT_NAME}/best_coco_AP_epoch_*.pth 2>/dev/nul
 
 python tools/test.py ${CONFIG_FILE} work_dirs/${EXPERIMENT_NAME}/${MODEL_FILE} --work-dir work_dirs/${EXPERIMENT_NAME}/eval
 
-python tools/test.py configs/animal_2d_keypoint/topdown_heatmap/pigpose/td-hm_hrnet-w32_8xb64-210e_pigpose-256x256.py work_dirs/td-hm_hrnet-w32_8xb64-210e_pigpose-256x256/best_coco_AP_epoch_3.pth --work-dir work_dirs/td-hm_hrnet-w32_8xb64-210e_pigpose-256x256/eval
 
 # SAVE RESULTS
 mkdir -p $projects/Outputs/pigpose
