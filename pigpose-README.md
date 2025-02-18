@@ -1,13 +1,13 @@
 # Guide for running the project
 
-# Installation
+## Installation
 **Reference:** https://mmpose.readthedocs.io/en/latest/installation.html
 ```bash
 conda create --name openmmlab python=3.8 -y
 conda activate openmmlab
 ```
 
-CHeck our version of CUDA
+Check our version of CUDA
 ```bash
 nvidia-smi
 #  CUDA Version: 12.8
@@ -24,14 +24,29 @@ pip install -U openmim
 mim install mmengine
 mim install "mmcv==2.1.0"
 mim install "mmdet>=3.1.0"
- ```
+```
+
+Clone the MMPose repository with Pig pose implementation
+ ```bash
+git clone git@github.com:Francis-Ferri-personal/mmpose.git
+  ```
+
 Install MMPose
 ```bash
 cd mmpose
 pip install -r requirements.txt
 pip install -v -e .
 ```
-Clone the MMPose repository with Pig pose implementation
- ```bash
-git clone git@github.com:Francis-Ferri-personal/mmpose.git
-  ```
+
+## Use in Digital Research Alliance Canada (DRAC)
+
+Upload your dataset and compress it
+
+You can use (modify if needed) the script
+
+```bash
+# tools\drac-train.sh
+cd $project/Workspace/mmpose
+# sbatch tools\drac-train.sh ${CONFIG_FILE} ${NUM_GPUS} ${SEED}
+sbatch tools\drac-train.sh configs/animal_2d_keypoint/topdown_heatmap/pigpose/td-hm_hrnet-w32_8xb64-210e_pigpose-256x256.py 2 42
+```

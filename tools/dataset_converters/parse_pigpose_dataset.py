@@ -88,7 +88,7 @@ def create_coco_dataset(file_list, img_root, save_path, start_ann_id=0):
     :param val_num: the number of annotated objects for validation.
     """
 
-    keypoints_info, _, _ = get_anno_info()
+    keypoints_info, _, category_info = get_anno_info()
 
     images = []
     annotations = []
@@ -134,6 +134,8 @@ def create_coco_dataset(file_list, img_root, save_path, start_ann_id=0):
             flattened_bboxpoints[2] = flattened_bboxpoints[2] - flattened_bboxpoints[0]
             flattened_bboxpoints[3] = flattened_bboxpoints[3] - flattened_bboxpoints[1]
             pig_annotations[group_id]["bbox"] = flattened_bboxpoints
+            # Get area
+            anno['area'] = float(flattened_bboxpoints[2] * flattened_bboxpoints[3])
 
             ann_id += 1
 
@@ -187,7 +189,7 @@ def create_coco_dataset(file_list, img_root, save_path, start_ann_id=0):
     cocotype['images'] = images
     cocotype['annotations'] = annotations
 
-    # cocotype['categories'] = category_info
+    cocotype['categories'] = category_info
 
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     json.dump(cocotype, open(save_path, 'w'), indent=4)

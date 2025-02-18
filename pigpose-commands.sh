@@ -24,5 +24,6 @@ bash ./tools/dist_train.sh configs/animal_2d_keypoint/topdown_heatmap/pigpose/td
 python tools/test.py configs/animal_2d_keypoint/topdown_heatmap/animalpose/td-hm_hrnet-w32_8xb64-210e_animalpose-256x256.py https://download.openmmlab.com/mmpose/animal/hrnet/hrnet_w32_animalpose_256x256-1aa7f075_20210426.pth --show
 
 # Get results
-python tools/test.py configs/animal_2d_keypoint/topdown_heatmap/animalpose/td-hm_hrnet-w32_8xb64-210e_animalpose-256x256.py https://download.openmmlab.com/mmpose/animal/hrnet/hrnet_w32_animalpose_256x256-1aa7f075_20210426.pth --work-dir eval
+python tools/test.py configs/animal_2d_keypoint/topdown_heatmap/animalpose/td-hm_hrnet-w32_8xb64-210e_animalpose-256x256.py https://download.openmmlab.com/mmpose/animal/hrnet/hrnet_w32_animalpose_256x256-1aa7f075_20210426.pth --work-dir work_dirs/td-hm_hrnet-w32_8xb64-210e_animalpose-256x256/eval
 
+python tools/test.py configs/animal_2d_keypoint/topdown_heatmap/pigpose/td-hm_hrnet-w32_8xb64-210e_pigpose-256x256.py work_dirs/td-hm_hrnet-w32_8xb64-210e_pigpose-256x256/best_coco_AP_epoch_3.pth --work-dir work_dirs/td-hm_hrnet-w32_8xb64-210e_pigpose-256x256/eval
