@@ -23,7 +23,11 @@ bash ./tools/dist_train.sh configs/animal_2d_keypoint/topdown_heatmap/pigpose/td
 # Test visualization
 python tools/test.py configs/animal_2d_keypoint/topdown_heatmap/animalpose/td-hm_hrnet-w32_8xb64-210e_animalpose-256x256.py https://download.openmmlab.com/mmpose/animal/hrnet/hrnet_w32_animalpose_256x256-1aa7f075_20210426.pth --show
 
+python tools/test.py configs/animal_2d_keypoint/topdown_heatmap/pigpose/td-hm_hrnet-w32_8xb64-210e_pigpose-256x256.py work_dirs/td-hm_hrnet-w32_8xb64-210e_pigpose-256x256/best_coco_AP_epoch_180.pth --show
+
 # Get results
 python tools/test.py configs/animal_2d_keypoint/topdown_heatmap/animalpose/td-hm_hrnet-w32_8xb64-210e_animalpose-256x256.py https://download.openmmlab.com/mmpose/animal/hrnet/hrnet_w32_animalpose_256x256-1aa7f075_20210426.pth --work-dir work_dirs/td-hm_hrnet-w32_8xb64-210e_animalpose-256x256/eval
 
 python tools/test.py configs/animal_2d_keypoint/topdown_heatmap/pigpose/td-hm_hrnet-w32_8xb64-210e_pigpose-256x256.py work_dirs/td-hm_hrnet-w32_8xb64-210e_pigpose-256x256/best_coco_AP_epoch_3.pth --work-dir work_dirs/td-hm_hrnet-w32_8xb64-210e_pigpose-256x256/eval
+
+python demo/bottomup_demo.py configs/body_2d_keypoint/dekr/coco/dekr_hrnet-w32_8xb10-140e_coco-512x512.py https://download.openmmlab.com/mmpose/v1/body_2d_keypoint/dekr/coco/dekr_hrnet-w32_8xb10-140e_coco-512x512_ac7c17bf-20221228.pth --input tests/data/coco/000000197388.jpg --output-root=vis_results --show --save-predictions
