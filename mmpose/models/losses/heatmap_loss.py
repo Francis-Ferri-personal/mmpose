@@ -511,9 +511,14 @@ class MLECCLoss(nn.Module):
 
         assert len(outputs) == len(targets), \
             'Outputs and targets must have the same length'
+        
+        # NOTE: This is my modification to avoid negative loss
+        # Create normalized targets without modifying the original targets
+        normalized_targets = [t / t.max(dim=-1, keepdim=True)[0].clamp(min=1e-6) for t in targets]    
 
         prob = 1.0
-        for o, t in zip(outputs, targets):
+        # for o, t in zip(outputs, targets):
+        for o, t in zip(outputs, normalized_targets):
             prob *= (o * t).sum(dim=-1)
 
         if self.mode == 'linear':
