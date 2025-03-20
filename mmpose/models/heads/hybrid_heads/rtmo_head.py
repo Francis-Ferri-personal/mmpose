@@ -877,7 +877,13 @@ class RTMOHead(YOLOXPoseHead):
             # using predictions and assigned ground truth instances
             extra_info['overlaps'] = cls_targets
             cls_targets = cls_targets.pow(self.overlaps_power).detach()
+
+            # NOTE: This changes are to adapt to multi class
+            obj_targets = torch.zeros((obj_targets.shape[0], self.num_classes), device=obj_targets.device)
+            obj_weights = torch.zeros((obj_weights.shape[0], self.num_classes), device=obj_weights.device)
+
             obj_targets[pos_masks] = cls_targets.to(obj_targets)
+            obj_weights[pos_masks] = cls_targets.to(obj_weights)
 
         # 3.4 classification loss
         losses['loss_cls'] = self.loss_cls(cls_preds_all, obj_targets,
