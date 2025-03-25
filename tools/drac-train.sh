@@ -7,6 +7,46 @@
 #SBATCH --mail-type=ALL
 #SBATCH --gres=gpu:v100l:2
 
+# GET PARAMETERS AND VALIDATION
+usage() {
+    echo "Usage: $0 --config CONFIG_FILE --gpus NUM_GPUS --dataset DATASET --seed SEED"
+    exit 1
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --config)
+            CONFIG_FILE="$2"
+            shift 2
+            ;;
+        --gpus)
+            NUM_GPUS="$2"
+            shift 2
+            ;;
+        --dataset)
+            DATASET="$2"
+            shift 2
+            ;;
+        --seed)
+            SEED="$2"
+            shift 2
+            ;;
+        --help)
+            usage
+            ;;
+        *)
+            echo "Unknown parameter: $1"
+            usage
+            ;;
+    esac
+done
+
+if [[ -z "$CONFIG_FILE" || -z "$NUM_GPUS" || -z "$DATASET" || -z "$SEED" ]]; then
+    echo "Missing required parameters."
+    usage
+fi
+
+
 # CODE AND DATA SETUP
 cd $SLURM_TMPDIR
 cp /home/kzn518/.ssh/id_drac .
@@ -17,7 +57,7 @@ git clone git@github.com:Francis-Ferri-personal/mmpose.git
 
 cd ./mmpose
 mkdir -p data/
-tar -xv --use-compress-program="pigz -d -p 4" -f $projects/Datasets/pigpose.tar.gz -C ./data/
+tar -xv --use-compress-program="pigz -d -p 4" -f $projects/Datasets/${DATASET}.tar.gz -C ./data/
 
 
 # VIRTUAL ENVIRONMENT SETUP
@@ -39,14 +79,8 @@ python setup.py install
 pip install -v -e .
 
 
-# GET PARAMETERS
-CONFIG_FILE=$1
-GPU_NUM=$2
-SEED=$3
-
-
 # RUN TRAINING
-./tools/dist_train.sh ${CONFIG_FILE} ${GPU_NUM} --cfg-options randomness.seed=${SEED}
+PORT=29501 bash ./tools/dist_train.sh ${CONFIG_FILE} ${NUM_GPUS} --cfg-options randomness.seed=${SEED}
 
 
 # RUN EVALUATION
@@ -59,14 +93,13 @@ python tools/test.py ${CONFIG_FILE} work_dirs/${EXPERIMENT_NAME}/${MODEL_FILE} -
 
 
 # SAVE RESULTS
-mkdir -p $projects/Outputs/pigpose
-tar -cvf $projects/Outputs/pigpose/${EXPERIMENT_NAME}-${SEED}.tar work_dirs/${EXPERIMENT_NAME}
+mkdir -p $projects/Outputs/${DATASET}/${EXPERIMENT_NAME}
+tar -cvf $projects/Outputs/${DATASET}/${EXPERIMENT_NAME}/${SEED}.tar work_dirs/${EXPERIMENT_NAME}
 
 
 # RUN YOUR JOB
 # cd $project/Workspace/mmpose
-# sbatch tools/drac-train.sh configs/animal_2d_keypoint/topdown_heatmap/pigpose/td-hm_hrnet-w32_8xb64-210e_pigpose-256x256.py 2 42
-
+# sbatch tools/drac-train.sh --config configs/animal_2d_keypoint/topdown_heatmap/pigpose/td-hm_hrnet-w32_8xb64-210e_pigpose-256x256.py --gpus 2 --dataset pigpose --seed 42
 # CHECK YOUR JOB
 # sq
 
