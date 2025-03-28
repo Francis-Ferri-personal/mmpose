@@ -1,8 +1,10 @@
+# Reference: dekr_hrnet-w32_8xb10-140e_coco-512x512.py
 _base_ = ['../../../_base_/default_runtime.py']
 
 # runtime
-# train_cfg = dict(max_epochs=140, val_interval=10)
-train_cfg = dict(max_epochs=300, val_interval=20) # CrowdPose
+train_cfg = dict(max_epochs=300, val_interval=10) # COCO
+# train_cfg = dict(max_epochs=140, val_interval=10) # COCO
+# train_cfg = dict(max_epochs=300, val_interval=20) # CrowdPose
 
 # optimizer
 optim_wrapper = dict(optimizer=dict(
@@ -19,7 +21,10 @@ param_scheduler = [
         type='MultiStepLR',
         begin=0,
         end=300,
-        milestones=[200, 260],
+        # end=140, # COCO
+        milestones=[90, 120], # COCO
+        # end=300, # CrowdPose
+        # milestones=[200, 260], # CrowdPose
         gamma=0.1,
         by_epoch=True)
 ]
@@ -89,17 +94,27 @@ model = dict(
     head=dict(
         type='DEKRHead',
         in_channels=480,
-        num_keypoints=17,
+        num_keypoints=19,
         heatmap_loss=dict(type='KeypointMSELoss', use_target_weight=True),
         displacement_loss=dict(
             type='SoftWeightSmoothL1Loss',
             use_target_weight=True,
             supervise_empty=False,
             beta=1 / 9,
-            loss_weight=0.2,
+            loss_weight=0.002, # COCO
             # loss_weight=0.004, # CrowdPose
         ),
         decoder=codec,
+        # This rescore net is adapted from the official repo.
+        # If you are not using the original COCO dataset for training,
+        # please make sure to remove the `rescore_cfg` item
+        # rescore_cfg=dict(
+        #     in_channels=74,
+        #     norm_indexes=(5, 6),
+        #     init_cfg=dict(
+        #         type='Pretrained',
+        #         checkpoint='https://download.openmmlab.com/mmpose/'
+        #         'pretrain_models/kpt_rescore_coco-33d58c5c.pth')),
         # This rescore net is adapted from the official repo.
         # If you are not using the original CrowdPose dataset for training,
         # please make sure to remove the `rescore_cfg` item
@@ -122,7 +137,7 @@ model = dict(
 find_unused_parameters = True
 
 # base dataset settings
-dataset_type = 'AP10KDataset'
+dataset_type = 'PigPoseDataset'
 data_mode = 'bottomup'
 data_root = 'data/'
 
@@ -161,8 +176,8 @@ train_dataloader = dict(
         type=dataset_type,
         data_root=data_root,
         data_mode=data_mode,
-        ann_file='ap10k/annotations/ap10k-train.json',
-        data_prefix=dict(img='ap10k/data/'),
+        ann_file='pigpose/pigpose_train.json',
+        data_prefix=dict(img='pigpose/'),
         pipeline=train_pipeline,
     ))
 
@@ -176,34 +191,19 @@ val_dataloader = dict(
         type=dataset_type,
         data_root=data_root,
         data_mode=data_mode,
-        ann_file='ap10k/annotations/ap10k-val.json',
-        data_prefix=dict(img='ap10k/data/'),
+        ann_file='pigpose/pigpose_val.json',
+        data_prefix=dict(img='pigpose/'),
         test_mode=True,
         pipeline=val_pipeline,
     ))
 
-test_dataloader = dict(
-    batch_size=1,
-    num_workers=1,
-    persistent_workers=True,
-    drop_last=False,
-    sampler=dict(type='DefaultSampler', shuffle=False, round_up=False),
-    dataset=dict(
-        type=dataset_type,
-        data_root=data_root,
-        data_mode=data_mode,
-        ann_file='ap10k/annotations/ap10k-test.json',
-        data_prefix=dict(img='ap10k/data/'),
-        test_mode=True,
-        pipeline=val_pipeline,
-    ))
-
+test_dataloader = val_dataloader
 
 
 # evaluators
 val_evaluator = dict(
     type='CocoMetric',
-    ann_file=data_root + 'ap10k/annotations/ap10k-val.json',
+    ann_file=data_root + 'pigpose/pigpose_val.json',
     nms_mode='none',
     score_mode='keypoint',
     # Crowd Pose
@@ -212,13 +212,4 @@ val_evaluator = dict(
     # prefix='crowdpose'
 )
 
-test_evaluator = dict(
-    type='CocoMetric',
-    ann_file=data_root + 'ap10k/annotations/ap10k-test.json',
-    nms_mode='none',
-    score_mode='keypoint',
-    # Crowd Pose
-    # use_area=False,
-    # iou_type='keypoints_crowd',
-    # prefix='crowdpose'
-)
+test_evaluator = val_evaluator 
