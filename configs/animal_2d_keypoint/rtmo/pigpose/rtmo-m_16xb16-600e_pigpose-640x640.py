@@ -6,7 +6,7 @@ train_cfg = dict(max_epochs=600, val_interval=20, dynamic_intervals=[(580, 1)])
 auto_scale_lr = dict(base_batch_size=256)
 
 default_hooks = dict(
-    checkpoint=dict(type='CheckpointHook', interval=40, max_keep_ckpts=3))
+    checkpoint=dict(type='CheckpointHook', interval=40, save_best='coco/AP', rule='greater'))
 
 optim_wrapper = dict(
     type='OptimWrapper',
@@ -50,7 +50,7 @@ param_scheduler = [
 
 # data
 input_size = (640, 640)
-metafile = 'configs/_base_/datasets/coco.py'
+metafile = 'configs/_base_/datasets/pigpose.py'
 codec = dict(type='YOLOXPoseAnnotationProcessor', input_size=input_size)
 
 train_pipeline_stage1 = [
@@ -89,9 +89,6 @@ train_pipeline_stage2 = [
     dict(
         type='BottomupRandomAffine',
         input_size=(640, 640),
-        shift_prob=0,
-        rotate_prob=0,
-        scale_prob=0,
         scale_type='long',
         pad_val=(114, 114, 114),
         bbox_keep_corner=False,
@@ -106,27 +103,27 @@ train_pipeline_stage2 = [
 ]
 
 # base dataset settings
-dataset_type = 'AP10KDataset'
+dataset_type = 'PigPoseDataset'
 data_mode = 'bottomup'
-data_root = 'data/ap10k/'
+data_root = 'data/'
 
 # train datasets
-dataset_ap10k = dict(
+dataset_coco = dict(
     type=dataset_type,
     data_root=data_root,
     data_mode=data_mode,
-    ann_file='annotations/ap10k-train-split1.json',
-    data_prefix=dict(img='data/'),
+    ann_file='pigpose/pigpose_train.json',
+    data_prefix=dict(img='pigpose/'),
     pipeline=train_pipeline_stage1,
 )
 
 train_dataloader = dict(
-    batch_size=32,
+    batch_size=16,
     num_workers=8,
     persistent_workers=True,
     pin_memory=True,
     sampler=dict(type='DefaultSampler', shuffle=True),
-    dataset=dataset_ap10k)
+    dataset=dataset_coco)
 
 val_pipeline = [
     dict(type='LoadImage'),
@@ -149,19 +146,17 @@ val_dataloader = dict(
         type=dataset_type,
         data_root=data_root,
         data_mode=data_mode,
-        ann_file='annotations/ap10k-val-split1.json',
-        data_prefix=dict(img='data/'),
+        ann_file='pigpose/pigpose_val.json',
+        data_prefix=dict(img='pigpose/'),
         test_mode=True,
         pipeline=val_pipeline,
     ))
-
-# TODO: add test pipeline
 test_dataloader = val_dataloader
 
 # evaluators
 val_evaluator = dict(
     type='CocoMetric',
-    ann_file=data_root + 'annotations/ap10k-val-split1.json',
+    ann_file=data_root + 'pigpose/pigpose_val.json',
     score_mode='bbox',
     nms_mode='none',
 )
@@ -179,6 +174,8 @@ custom_hooks = [
         epoch_attributes={
             280: {
                 'proxy_target_cc': True,
+                'overlaps_power': 1.0,
+                'loss_cls.loss_weight': 2.0,
                 'loss_mle.loss_weight': 5.0,
                 'loss_oks.loss_weight': 10.0
             },
@@ -195,8 +192,8 @@ custom_hooks = [
 ]
 
 # model
-widen_factor = 0.5
-deepen_factor = 0.33
+widen_factor = 0.75
+deepen_factor = 0.67
 
 model = dict(
     type='BottomupPoseEstimator',
@@ -229,14 +226,13 @@ model = dict(
         act_cfg=dict(type='Swish'),
         init_cfg=dict(
             type='Pretrained',
-            checkpoint='https://download.openmmlab.com/mmdetection/v2.0/'
-            'yolox/yolox_s_8x8_300e_coco/yolox_s_8x8_300e_coco_'
-            '20211121_095711-4592a793.pth',
+            checkpoint='https://download.openmmlab.com/mmpose/v1/'
+            'pretrained_models/yolox_m_8x8_300e_coco_20230829.pth',
             prefix='backbone.',
         )),
     neck=dict(
         type='HybridEncoder',
-        in_channels=[128, 256, 512],
+        in_channels=[192, 384, 768],
         deepen_factor=deepen_factor,
         widen_factor=widen_factor,
         hidden_dim=256,
@@ -252,20 +248,20 @@ model = dict(
             type='ChannelMapper',
             in_channels=[256, 256],
             kernel_size=1,
-            out_channels=256,
+            out_channels=384,
             act_cfg=None,
             norm_cfg=dict(type='BN'),
             num_outs=2)),
     head=dict(
         type='RTMOHead',
-        num_keypoints=17,
+        num_keypoints=19,
         featmap_strides=(16, 32),
         head_module_cfg=dict(
             num_classes=1,
             in_channels=256,
             cls_feat_channels=256,
             channels_per_group=36,
-            pose_vec_channels=256,
+            pose_vec_channels=384,
             widen_factor=widen_factor,
             stacked_convs=2,
             norm_cfg=dict(type='BN', momentum=0.03, eps=0.001),
@@ -273,14 +269,13 @@ model = dict(
         assigner=dict(
             type='SimOTAAssigner',
             dynamic_k_indicator='oks',
-            oks_calculator=dict(type='PoseOKS', metainfo=metafile),
-            use_keypoints_for_center=True),
+            oks_calculator=dict(type='PoseOKS', metainfo=metafile)),
         prior_generator=dict(
             type='MlvlPointGenerator',
             centralize_points=True,
             strides=[16, 32]),
         dcc_cfg=dict(
-            in_channels=256,
+            in_channels=384,
             feat_channels=128,
             num_bins=(192, 256),
             spe_channels=128,
@@ -316,7 +311,7 @@ model = dict(
         loss_mle=dict(
             type='MLECCLoss',
             use_target_weight=True,
-            loss_weight=1.0,
+            loss_weight=1e-2,
         ),
         loss_bbox_aux=dict(type='L1Loss', reduction='sum', loss_weight=1.0),
     ),
