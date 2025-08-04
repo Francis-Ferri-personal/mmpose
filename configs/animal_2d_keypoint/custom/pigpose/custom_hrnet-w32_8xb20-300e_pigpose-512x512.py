@@ -1,8 +1,7 @@
 _base_ = ['../../../_base_/default_runtime.py']
 
 # runtime
-# train_cfg = dict(max_epochs=300, val_interval=10)
-train_cfg = dict(max_epochs=150, val_interval=10)
+train_cfg = dict(max_epochs=300, val_interval=10)
 
 randomness = dict(seed=42, deterministic=True)
 
@@ -89,7 +88,7 @@ model = dict(
         contrastive_loss=dict(
             type='InfoNCELoss', temperature=0.05, loss_weight=1.0),
         decoder=codec,
-        conv_type='AdaptiveRotatedConv2d', # 1x1Conv, Conv2d, DepthwiseSeparableConvModule, DilatedConv, DeformConv2d, AdaptiveRotatedConv2d
+        conv_type='Conv2d', # 1x1Conv, Conv2d, DepthwiseSeparableConvModule, DilatedConv, DeformConv2d, AdaptiveRotatedConv2d
     ),
     train_cfg=dict(max_train_instances=200),
     test_cfg=dict(
@@ -130,8 +129,7 @@ val_pipeline = [
 
 # data loaders
 train_dataloader = dict(
-    # batch_size=20,
-    batch_size=3,
+    batch_size=20,
     num_workers=2,
     persistent_workers=True,
     sampler=dict(type='DefaultSampler', shuffle=True),

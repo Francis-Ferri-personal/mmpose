@@ -89,17 +89,22 @@ EXPERIMENT_NAME="${CONFIG_BASENAME%.py}"
 
 MODEL_FILE=$(ls work_dirs/${EXPERIMENT_NAME}/best_coco_AP_epoch_*.pth 2>/dev/null | head -n 1)
 
-python tools/test.py ${CONFIG_FILE} work_dirs/${EXPERIMENT_NAME}/${MODEL_FILE} --work-dir work_dirs/${EXPERIMENT_NAME}/eval
+# Metrics evaluation
+python tools/test.py ${CONFIG_FILE} work_dirs/${EXPERIMENT_NAME}/${MODEL_FILE} --work-dir work_dirs/${EXPERIMENT_NAME}/eval > work_dirs/${EXPERIMENT_NAME}/model-evaluation.txt
+
+# Performance evaluation
+python tools/analysis_tools/get_flops.py ${CONFIG_FILE} > work_dirs/${EXPERIMENT_NAME}/model-analysis.txt
 
 
 # SAVE RESULTS
-mkdir -p $projects/Outputs/${DATASET}/${EXPERIMENT_NAME}
-tar -cvf $projects/Outputs/${DATASET}/${EXPERIMENT_NAME}/${SEED}.tar work_dirs/${EXPERIMENT_NAME}
+mkdir -p $projects/Outputs/${DATASET}
+tar -cvf $projects/Outputs/${DATASET}/${EXPERIMENT_NAME}.tar work_dirs/${EXPERIMENT_NAME}
 
 
 # RUN YOUR JOB
 # cd $project/Workspace/mmpose
-# sbatch tools/drac-train.sh --config configs/animal_2d_keypoint/topdown_heatmap/pigpose/td-hm_hrnet-w32_8xb64-210e_pigpose-256x256.py --gpus 2 --dataset pigpose --seed 42
+# sbatch tools/drac-train.sh --config configs/animal_2d_keypoint/topdown_heatmap/pigpose/td-hm_hrnet-w32_8xb64-210e_pigpose-256x256.py --gpus 2 --dataset pigpose
+
 # CHECK YOUR JOB
 # sq
 
