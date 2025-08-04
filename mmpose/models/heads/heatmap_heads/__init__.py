@@ -6,8 +6,10 @@ from .heatmap_head import HeatmapHead
 from .internet_head import InternetHead
 from .mspn_head import MSPNHead
 from .vipnas_head import ViPNASHead
+from .custom_head import CustomHead
 
 __all__ = [
     'HeatmapHead', 'CPMHead', 'MSPNHead', 'ViPNASHead',
-    'AssociativeEmbeddingHead', 'CIDHead', 'InternetHead'
+    'AssociativeEmbeddingHead', 'CIDHead', 'InternetHead', 
+    'CustomHead'
 ]

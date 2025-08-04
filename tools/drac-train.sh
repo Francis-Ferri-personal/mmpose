@@ -7,9 +7,13 @@
 #SBATCH --mail-type=ALL
 #SBATCH --gres=gpu:v100l:2
 
+
+# TODO: set here
+export CUBLAS_WORKSPACE_CONFIG=:4096:8
+
 # GET PARAMETERS AND VALIDATION
 usage() {
-    echo "Usage: $0 --config CONFIG_FILE --gpus NUM_GPUS --dataset DATASET --seed SEED"
+    echo "Usage: $0 --config CONFIG_FILE --gpus NUM_GPUS --dataset DATASET"
     exit 1
 }
 
@@ -27,10 +31,6 @@ while [[ $# -gt 0 ]]; do
             DATASET="$2"
             shift 2
             ;;
-        --seed)
-            SEED="$2"
-            shift 2
-            ;;
         --help)
             usage
             ;;
@@ -41,7 +41,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ -z "$CONFIG_FILE" || -z "$NUM_GPUS" || -z "$DATASET" || -z "$SEED" ]]; then
+if [[ -z "$CONFIG_FILE" || -z "$NUM_GPUS" || -z "$DATASET"]]; then
     echo "Missing required parameters."
     usage
 fi
@@ -80,7 +80,7 @@ pip install -v -e .
 
 
 # RUN TRAINING
-PORT=29501 bash ./tools/dist_train.sh ${CONFIG_FILE} ${NUM_GPUS} --cfg-options randomness.seed=${SEED}
+PORT=29501 bash ./tools/dist_train.sh ${CONFIG_FILE} ${NUM_GPUS}
 
 
 # RUN EVALUATION

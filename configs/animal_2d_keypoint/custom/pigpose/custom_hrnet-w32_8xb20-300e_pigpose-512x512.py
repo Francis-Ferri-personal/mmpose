@@ -1,7 +1,10 @@
 _base_ = ['../../../_base_/default_runtime.py']
 
 # runtime
-train_cfg = dict(max_epochs=300, val_interval=10)
+# train_cfg = dict(max_epochs=300, val_interval=10)
+train_cfg = dict(max_epochs=150, val_interval=10)
+
+randomness = dict(seed=42, deterministic=True)
 
 # optimizer
 optim_wrapper = dict(optimizer=dict(
@@ -24,7 +27,7 @@ param_scheduler = [
 auto_scale_lr = dict(base_batch_size=160)
 
 # hooks
-default_hooks = dict(checkpoint=dict(save_best='coco/AP', rule='greater'))
+default_hooks = dict(checkpoint=dict(save_best='coco/AP', rule='greater', max_keep_ckpts=3))
 
 # codec settings
 codec = dict(
@@ -86,6 +89,7 @@ model = dict(
         contrastive_loss=dict(
             type='InfoNCELoss', temperature=0.05, loss_weight=1.0),
         decoder=codec,
+        conv_type='AdaptiveRotatedConv2d', # 1x1Conv, Conv2d, DepthwiseSeparableConvModule, DilatedConv, DeformConv2d, AdaptiveRotatedConv2d
     ),
     train_cfg=dict(max_train_instances=200),
     test_cfg=dict(

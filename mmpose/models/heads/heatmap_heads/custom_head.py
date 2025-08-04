@@ -7,6 +7,7 @@ import torch.nn as nn
 from mmcv.cnn import build_conv_layer, DepthwiseSeparableConvModule
 from mmengine.model import BaseModule, ModuleDict
 from mmengine.structures import InstanceData, PixelData
+from mmcv.ops import DeformConv2dPack
 from torch import Tensor
 
 
@@ -14,6 +15,14 @@ from mmpose.registry import KEYPOINT_CODECS, MODELS
 from mmpose.utils.typing import (ConfigType, Features, OptConfigType,
                                  OptSampleList, Predictions)
 from ..base_head import BaseHead
+from .utils import AdaptiveRotatedConv2d, RountingFunction
+
+MODELS.register_module('DepthwiseSeparableConvModule', module=DepthwiseSeparableConvModule)
+# Reference: https://www.youtube.com/watch?v=6TtOuVJ9GBQ
+MODELS.register_module("DeformConv", module=DeformConv2dPack)
+
+MODELS.register_module("AdaptiveRotatedConv2d", module=AdaptiveRotatedConv2d)
+
 
 def smooth_heatmaps(heatmaps: Tensor, blur_kernel_size: int) -> Tensor:
     """Smooth the heatmaps by blurring and averaging.
@@ -54,6 +63,57 @@ class TruncSigmoid(nn.Sigmoid):
         return output
     
 
+def get_conv_operation(
+        conv_type: str, 
+        in_channels: int, 
+        out_channels: int, 
+        kernel_size: int = 3
+    ) -> nn.Module:
+    layer_config = dict(
+                type='Conv2d',
+                in_channels=in_channels,
+                out_channels=out_channels,
+                kernel_size=kernel_size)
+    
+    layer_config["padding"] = layer_config["kernel_size"] // 2
+
+    if conv_type == "AdaptiveRotatedConv2d":
+        kernel_number = 4
+        # NOTE: This only works for 3x3 kernels
+        layer_config["kernel_size"] = 3
+        layer_config["padding"] = layer_config["kernel_size"] // 2
+        return AdaptiveRotatedConv2d(
+                in_channels=layer_config["in_channels"],
+                out_channels=layer_config["out_channels"],
+                kernel_size=layer_config["kernel_size"], 
+                padding=layer_config["padding"],
+                kernel_number=kernel_number,
+                rounting_func=RountingFunction(
+                    in_channels=layer_config["in_channels"],
+                    kernel_number=kernel_number
+                ),
+            )
+    
+    elif conv_type == "1x1Conv":
+        layer_config["kernel_size"] = 1
+        layer_config["padding"] = layer_config["kernel_size"] // 2
+    
+    elif conv_type == 'DepthwiseSeparableConvModule':
+        layer_config["type"] = 'DepthwiseSeparableConvModule'
+        # For kernel_size=5, the padding must be 2.
+        # If you use dilation=2 and kernel_size=3: padding=2
+
+    elif conv_type == 'DilatedConv':
+        # padding = dilation × (k - 1) // 2
+        layer_config["dilation"] = 4
+        layer_config["padding"] = layer_config["dilation"] * (layer_config["kernel_size"] - 1) // 2 # Keep spatial dims
+
+    elif conv_type == 'DeformConv':
+        layer_config["type"] = "DeformConv"
+    
+    
+    return build_conv_layer(layer_config)
+
 
 # TODO: Rename it as OIIA for Optimized or UIIA
 class CustomIIAModule(BaseModule):
@@ -77,29 +137,30 @@ class CustomIIAModule(BaseModule):
     ):
         super().__init__(init_cfg=init_cfg)
 
+        conv_type = init_cfg[-1]["layer"][0]
 
-        # HACK: CHange the layers here 
-        # TODO: try: depthwise separable convolutions
-        self.keypoint_root_conv = DepthwiseSeparableConvModule(
+        # TODO: Trata adaptable convolutions en donde junta las instancias, es decir los instance embeddings. Tal vez debas mover este
+        """
+            2. Dynamic Convolutions
+            Convolutional kernels are dynamically generated from embeddings or input conditions (as you mentioned).
+            It allows you to adapt filters according to each instance or context.
+        """
+
+        # TODO: Trata Deformable convolutions
+        # HACK: TODO: Try to implement this  Adaptive Rotated convolutions: Adaptive Rotated Convolution for Rotated Object Detection
+        # Default
+        self.keypoint_root_conv = get_conv_operation(
+            conv_type= conv_type,
             in_channels=in_channels,
             out_channels=out_channels,
-            kernel_size=3,
-            dilation=1,
-            padding=1
-        )
-        # TODO: Try to replace with adaptable convolutions
-
-        # Default
-        # self.keypoint_root_conv = build_conv_layer(
-        #     dict(
-        #         type='Conv2d',
-        #         in_channels=in_channels,
-        #         out_channels=out_channels,
-        #         kernel_size=1))
+            # kernel_size=1)
+            kernel_size=3)
         self.sigmoid = TruncSigmoid(min=clamp_delta, max=1 - clamp_delta)
 
     def forward(self, feats: Tensor):
+        # print("HERE:", feats.shape)
         heatmaps = self.keypoint_root_conv(feats)
+        # print("HERE:", heatmaps.shape)
         heatmaps = self.sigmoid(heatmaps)
         return heatmaps
     
@@ -277,7 +338,7 @@ class SpatialAttention(nn.Module):
             vectors.
     """
 
-    def __init__(self, in_channels, out_channels):
+    def __init__(self, in_channels, out_channels, conv_type='Conv2d'):
         super(SpatialAttention, self).__init__()
         """
             ChannelAttention and SpatialAttention both define a linear layer named 'atn',
@@ -302,7 +363,7 @@ class SpatialAttention(nn.Module):
             This value is used, for example, when converting coordinates between the original space and the feature map space (as in spatial attention with relative coordinates).
         """
         self.feat_stride = 4
-        self.conv = nn.Conv2d(in_channels=3, out_channels=1, kernel_size=5, stride=1, padding=2)
+        self.conv = get_conv_operation(conv_type=conv_type, in_channels=3, out_channels=1, kernel_size=5)
 
     def _get_pixel_coords(self, heatmap_size: Tuple, device: str = 'cpu'):
         """Get pixel coordinates for each element in the heatmap.
@@ -403,26 +464,17 @@ class CustomGFDModule(BaseModule):
     ):
         super().__init__(init_cfg=init_cfg)
     
-        # HACK: CHange the layers here 
-        # TODO: try: depthwise separable convolutions
-        self.conv_down = DepthwiseSeparableConvModule(
-            in_channels=in_channels,
-            out_channels=gfd_channels,
-            kernel_size=3,
-            dilation=1,
-            padding=1
-        )
-
-        # TODO: Dilated (Atrous) Convolution
         # TODO: Deformable Convolutions
         
         # Default
-        # self.conv_down = build_conv_layer(
-        #         dict(
-        #             type='Conv2d',
-        #             in_channels=in_channels,
-        #             out_channels=gfd_channels,
-        #             kernel_size=1))
+        conv_type = init_cfg[-1]["layer"][0]
+
+        self.conv_down = get_conv_operation(
+            conv_type=conv_type,
+            in_channels=in_channels,
+            out_channels=gfd_channels,
+            # kernel_size=1)
+            kernel_size=3)
         
         
         # TODO: Try to TODO: Implement Dynamic Kernel Generation
@@ -434,15 +486,14 @@ class CustomGFDModule(BaseModule):
         # TODO: we could change the channel attention with something more advanced.
         self.channel_attention = ChannelAttention(in_channels, gfd_channels)
         # TODO: we could change the spatial attention with something more advanced.
-        self.spatial_attention = SpatialAttention(in_channels, gfd_channels)
+        self.spatial_attention = SpatialAttention(in_channels, gfd_channels, conv_type)
         
-
-        self.fuse_attention = build_conv_layer(
-            dict(
-                type='Conv2d',
-                in_channels=gfd_channels * 2,
-                out_channels=gfd_channels,
-                kernel_size=1))
+        self.fuse_attention = get_conv_operation(
+            conv_type=conv_type,
+            in_channels=gfd_channels * 2,
+            out_channels=gfd_channels,
+            # kernel_size=1)
+            kernel_size=3)
         
         """
         heatmap_conv:
@@ -451,12 +502,12 @@ class CustomGFDModule(BaseModule):
             It is typically a 1×1 convolution where out_channels = num_keypoints.
         """
 
-        self.heatmap_conv = build_conv_layer(
-            dict(
-                type='Conv2d',
-                in_channels=gfd_channels,
-                out_channels=out_channels,
-                kernel_size=1))
+        self.heatmap_conv = get_conv_operation(
+            conv_type=conv_type,
+            in_channels=gfd_channels,
+            out_channels=out_channels,
+            # kernel_size=1)
+            kernel_size=3)
         self.sigmoid = TruncSigmoid(min=clamp_delta, max=1 - clamp_delta)
 
     def forward(
@@ -517,6 +568,9 @@ class CustomHead(BaseHead):
                      type='FocalHeatmapLoss'),
                  contrastive_loss: OptConfigType = dict(type='InfoNCELoss'),
 
+                 # My customizations
+                 conv_type: str = 'Conv2d',
+
                  decoder: OptConfigType = None,
                  init_cfg: OptConfigType = None):
         
@@ -531,6 +585,9 @@ class CustomHead(BaseHead):
         else:
             self.decoder = None
 
+        # My customizations
+        self.conv_type = conv_type
+
         # Initialize bias so that sigmoid output starts near prior_prob (e.g., 1%) to stabilize early training
         # prior_prob is the expected probability of a positive prediction (e.g., keypoint) before training starts.
         bias_value = -math.log((1 - prior_prob) / prior_prob)
@@ -543,7 +600,7 @@ class CustomHead(BaseHead):
                 # This dictionary seems the default do not pay attention to Linear
                 dict(
                     type='Normal',
-                    layer=['Conv2d', 'Linear'],
+                    layer=[self.conv_type, 'Linear'],
                     std=0.001,
                     override=dict(
                         name='keypoint_root_conv',
@@ -558,7 +615,7 @@ class CustomHead(BaseHead):
             init_cfg=init_cfg + [
                 dict(
                     type='Normal',
-                    layer=['Conv2d', 'Linear'],
+                    layer=[self.conv_type, 'Linear'],
                     std=0.001,
                     override=dict(
                         name='heatmap_conv',

@@ -50,3 +50,18 @@ cd $project/Workspace/mmpose
 # sbatch tools\drac-train.sh ${CONFIG_FILE} ${NUM_GPUS} ${SEED}
 sbatch tools\drac-train.sh configs/animal_2d_keypoint/topdown_heatmap/pigpose/td-hm_hrnet-w32_8xb64-210e_pigpose-256x256.py 2 42
 ```
+
+Modification for weights:
+/home/kzn518/cmc/.conda/envs/openmmlabpose/lib/python3.9/site-packages/torch/serialization.py
+```python
+def load(
+    f: FileLike,
+    map_location: MAP_LOCATION = None,
+    pickle_module: Any = None,
+    *,
+    # weights_only: Optional[bool] = None,
+    weights_only: Optional[bool] = False,
+    mmap: Optional[bool] = None,
+    **pickle_load_args: Any,
+) -> Any:
+```

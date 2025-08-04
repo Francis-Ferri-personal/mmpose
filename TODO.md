@@ -1,3 +1,7 @@
+
+Check RTMO FLOPS are low You can use it in your architecture. ALso the reduce the number of params
+I will do the expiments of my custom architecture with 150 epochs
+
 Check these file to make it bottom up
 bottomup_demo.py
 

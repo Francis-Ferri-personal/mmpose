@@ -1,3 +1,16 @@
+# Traininig
+python tools/train.py configs/animal_2d_keypoint/cid/pigpose/cid_hrnet-w32_8xb20-300e_pigpose-512x512.py
+
+# Model evaluation
+python tools/test.py configs/animal_2d_keypoint/cid/pigpose/cid_hrnet-w32_8xb20-300e_pigpose-512x512.py work_dirs/cid_hrnet-w32_8xb20-300e_pigpose-512x512/best_coco_AP_epoch_100.pth --work-dir work_dirs/cid_hrnet-w32_8xb20-300e_pigpose-512x512/eval > work_dirs/cid_hrnet-w32_8xb20-300e_pigpose-512x512/model-evaluation.txt
+
+# Analysis Parmas and FLOPS
+python tools/analysis_tools/get_flops.py configs/animal_2d_keypoint/cid/pigpose/cid_hrnet-w32_8xb20-300e_pigpose-512x512.py > work_dirs/cid_hrnet-w32_8xb20-300e_pigpose-512x512/model-analysis.txt
+
+# Transfger results
+scp kzn518@ko-lab2.usask.ca:/home/kzn518/cmc/Downloads/cid_hrnet-w32_8xb20-300e_pigpose-512x512.zip .
+
+
 python demo/topdown_demo_with_mmdet.py demo/mmdetection_cfg/rtmdet_m_8xb32-300e_coco.py https://download.openmmlab.com/mmdetection/v3.0/rtmdet/rtmdet_m_8xb32-300e_coco/rtmdet_m_8xb32-300e_coco_20220719_112220-229f527c.pth configs/animal_2d_keypoint/topdown_heatmap/animalpose/td-hm_hrnet-w32_8xb64-210e_animalpose-256x256.py https://download.openmmlab.com/mmpose/animal/hrnet/hrnet_w32_animalpose_256x256-1aa7f075_20210426.pth --input tests/data/pigpose/pig.png --show --draw-heatmap --det-cat-id=15
 
 python demo/inferencer_demo.py tests/data/ap10k --pose2d animal --vis-out-dir vis_results/ap10k
