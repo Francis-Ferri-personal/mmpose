@@ -8,7 +8,6 @@
 #SBATCH --gres=gpu:v100l:2
 
 
-# TODO: set here
 export CUBLAS_WORKSPACE_CONFIG=:4096:8
 
 # GET PARAMETERS AND VALIDATION
@@ -41,7 +40,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ -z "$CONFIG_FILE" || -z "$NUM_GPUS" || -z "$DATASET"]]; then
+if [[ -z "$CONFIG_FILE" || -z "$NUM_GPUS" || -z "$DATASET" ]]; then
     echo "Missing required parameters."
     usage
 fi
