@@ -88,8 +88,6 @@ EXPERIMENT_NAME="${CONFIG_BASENAME%.py}"
 
 MODEL_FILE=$(ls work_dirs/${EXPERIMENT_NAME}/best_coco_AP_epoch_*.pth 2>/dev/null | head -n 1)
 
-echo Modelo: $MODEL_FILE
-
 # Metrics evaluation
 python tools/test.py ${CONFIG_FILE} ${MODEL_FILE} --work-dir work_dirs/${EXPERIMENT_NAME}/eval > work_dirs/${EXPERIMENT_NAME}/model-evaluation.txt
 
