@@ -30,6 +30,10 @@ while [[ $# -gt 0 ]]; do
             DATASET="$2"
             shift 2
             ;;
+        --port)
+            PORT="$2"
+            shift 2
+            ;;
         --help)
             usage
             ;;
@@ -40,7 +44,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ -z "$CONFIG_FILE" || -z "$NUM_GPUS" || -z "$DATASET" ]]; then
+# VALIDATE REQUIRED PARAMETERS
+if [[ -z "$CONFIG_FILE" || -z "$NUM_GPUS" || -z "$DATASET" || -z "$PORT" ]]; then
     echo "Missing required parameters."
     usage
 fi
@@ -79,7 +84,7 @@ pip install -v -e .
 
 
 # RUN TRAINING
-PORT=29501 bash ./tools/dist_train.sh ${CONFIG_FILE} ${NUM_GPUS}
+PORT=${PORT} bash ./tools/dist_train.sh ${CONFIG_FILE} ${NUM_GPUS}
 
 
 # RUN EVALUATION
@@ -102,7 +107,8 @@ tar -cvf $projects/Outputs/${DATASET}/${EXPERIMENT_NAME}.tar work_dirs/${EXPERIM
 
 # RUN YOUR JOB
 # cd $project/Workspace/mmpose
-# sbatch tools/drac-train.sh --config configs/animal_2d_keypoint/topdown_heatmap/pigpose/td-hm_hrnet-w32_8xb64-210e_pigpose-256x256.py --gpus 2 --dataset pigpose
+# sbatch tools/drac-train.sh --config configs/animal_2d_keypoint/topdown_heatmap/pigpose/td-hm_hrnet-w32_8xb64-210e_pigpose-256x256.py --gpus 2 --dataset pigpose --port 29501
+# NOTE: Change the port number to avoid conflicts 
 
 # CHECK YOUR JOB
 # sq
