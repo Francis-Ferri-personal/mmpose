@@ -152,10 +152,46 @@ class CustomIIAModule(BaseModule):
         self.keypoint_root_conv = get_conv_operation(
             conv_type= conv_type,
             in_channels=in_channels,
-            out_channels=out_channels,
+            # TODO:
+            # I here that we can add information of bbox too here. It could be good, not only keypoint visibility. Maybe this way we can have better results.
+            # TODO: Maybe reduce only to root the output.
+            # TODO: and HACK: Use the contrastive learning to have a feature map for attention with the similarities between pixels 
+            out_channels=out_channels, # it is the number of keypoints + root (center of instance or not)
             # kernel_size=1)
             kernel_size=3)
         self.sigmoid = TruncSigmoid(min=clamp_delta, max=1 - clamp_delta)
+        # TODO:
+        """
+        1. Descriptores geométricos (forma/tamaño/orientación)
+            Puedes agregar información global sobre la forma y distribución de los keypoints de cada instancia:
+
+            📏 Bounding box estimado (w, h, aspect ratio)
+
+            🧭 Orientación corporal (e.g., vector de dirección hombros → caderas)
+
+            🧩 Dispersión de los keypoints (cuán extendidos están)
+
+            🔄 Invariante a rotaciones/escalado: Momentos geométricos
+
+            Esto se puede aprender como un vector adicional o como un canal auxiliar.
+
+        2. Estado local del fondo / contexto
+            Proporcionar a la red una idea del entorno alrededor del centro de la instancia:
+
+            📦 Un crop contextual alrededor del root (usando deformable conv o atención local).
+
+        🔶 4. Embeddings semánticos
+Si sabes qué tipo de instancia es (humano, animal, tipo de postura...), puedes incorporar:
+
+🧠 Un vector semántico de clase o acción (caminar, correr, tumbarse)
+
+🔢 Un embedding aprendido que capture contexto de pose
+        
+ 5. Heatmaps auxiliares
+🌪️ Heatmap de gradientes de cambio (para ver bordes de instancias)
+
+7. Embedding posicional absoluto o relativo
+        """
 
     def forward(self, feats: Tensor):
         # print("HERE:", feats.shape)
@@ -178,7 +214,8 @@ class CustomIIAModule(BaseModule):
         """
         assert indices.dtype == torch.long
         if indices.shape[1] == 3:
-            b, w, h = [ind.squeeze(-1) for ind in indices.split(1, -1)]
+            b, w, h = [ind.squeeze(-1) for ind in indices.split(1, -1)] 
+
             instance_feats = feats[b, :, h, w]
         elif indices.shape[1] == 2:
             w, h = [ind.squeeze(-1) for ind in indices.split(1, -1)]
@@ -225,7 +262,7 @@ class CustomIIAModule(BaseModule):
 
         Args:
             feats (Tensor): Input feature tensor.
-            instance_coords (Tensor): Coordinates of the instance roots.
+            instance_coords (Tensor): Coordinates of the instance roots. (Ground Truth)
             instance_imgids (Tensor): Sample indices of each instances
                 in the batch.
 
@@ -233,9 +270,10 @@ class CustomIIAModule(BaseModule):
             Tuple[Tensor, Tensor]: Extracted feature vectors and heatmaps
                 for the instances.
         """
-        heatmaps = self.forward(feats)
-        indices = torch.cat((instance_imgids[:, None], instance_coords), dim=1)
-        instance_feats = self._sample_feats(feats, indices)
+        heatmaps = self.forward(feats) # (b, c, 128, 128) i.e [6, 32, 128, 128]
+        indices = torch.cat((instance_imgids[:, None], instance_coords), dim=1)  # (samples in batch, 3) 3 is for img idx, x and y
+        instance_feats = self._sample_feats(feats, indices) # (samples in batch (instances), channel in features) i.e (instances, 480)
+        # print("iNSTANCE FEATS shape: ", instance_feats.shape) 
 
         return instance_feats, heatmaps
     
@@ -271,9 +309,9 @@ class CustomIIAModule(BaseModule):
         # compute heatmaps
         # Extract the last channel (coupled heatmap) to locate instances during inference.
         # That last channel is used to decide where there are instances in the image.
-        # NOTE: It seems one feature map per sampel in batch. but if that is the case, we are wasting resources in the convolutions.
-        # TODO: The output channel of the convolution should be one check it because they arre using only one channe for instance it seems.
-        heatmaps = self.forward(feats).narrow(1, -1, 1)
+        # NOTE: It seems one feature map per sample in batch. but if that is the case, we are wasting resources in the convolutions.
+        # TODO: The output channel of the convolution should be one check it because they are using only one channel for instance it seems.
+        heatmaps = self.forward(feats).narrow(1, -1, 1) # KEY: extracts only the last channel, which is the coupled heatmap of the "root" (instance).
         # TODO: print(heatmaps.shape) # it should be (B, 1, H, W)
         
         # If flip_test is enabled, average the original and flipped heatmaps for robustness
@@ -285,12 +323,12 @@ class CustomIIAModule(BaseModule):
 
         # decode heatmaps
         # This step highlights local maxima (peaks in the heatmap) that are possible centers of individuals or keypoints.
-        maximums = self._hierarchical_pool(smoothed_heatmaps)
+        maximums = self._hierarchical_pool(smoothed_heatmaps) # Key: Applies max pooling to detect local maxima (heatmap peaks).
 
         # Keep only the original heatmap values that are true local maxima
         # (i.e., values equal to their pooled maximum in the neighborhood).
         # TODO: NOTE: What if in addition to the local maximum that is the center of the instance we include the maximum or minimum points that divide two instances as a feature map. I mean this could be an additional feature map to pay attention to, but the relation will be inverse we want to avoid theses in the feature map not to include them.
-        maximums = torch.eq(maximums, smoothed_heatmaps).float()
+        maximums = torch.eq(maximums, smoothed_heatmaps).float() # Then, non-local peaks are masked: only values that are equal to their neighboring maxima are kept.
         maximums = (smoothed_heatmaps * maximums).reshape(-1) # flattens the vector i.e. [0.1, 0.0, 0.9, 0.0, ..., 0.0]
         scores, pos_ind = maximums.topk(max_instances, dim=0)
         select_ind = (scores > (score_threshold)).nonzero().squeeze(1)
@@ -324,8 +362,16 @@ class ChannelAttention(nn.Module):
     def forward(self, global_feats: Tensor, instance_feats: Tensor) -> Tensor:
         """Applies attention to the channel dimension of the input tensor."""
 
+
+
+
+        # print("chequeando cantidad de Valores", global_feats.shape, instance_feats.shape)# [9, 32, 128, 128]) torch.Size([9, 480])
+        # HACK: I think that because the instance features are too simple they lose information.
+        # Global features:[instances, 32, 128, 128] (we have same number because we duplicate the input features per instance in the image).  Instance features: [instances, 480] 
         instance_feats = self.atn(instance_feats).unsqueeze(2).unsqueeze(3)
-        return global_feats * instance_feats
+        # print ("Instance features: ", instance_feats.shape) # [instances, 32, 1, 1])
+        return global_feats * instance_feats #We assing importance to each channel
+         
     
 
 class SpatialAttention(nn.Module):
@@ -406,12 +452,16 @@ class SpatialAttention(nn.Module):
         Returns:
             Tensor containing the modulated global features.
         """
-        B, C, H, W = global_feats.size()
+        B, C, H, W = global_feats.size() # [num_instances, 32, 128, 128]
 
-        instance_feats = self.atn(instance_feats).reshape(B, C, 1, 1)
-        feats = global_feats * instance_feats.expand_as(global_feats)
-        fsum = torch.sum(feats, dim=1, keepdim=True)
 
+
+        instance_feats = self.atn(instance_feats).reshape(B, C, 1, 1) # [num_instances, 480] -> [num_instances, 32, 1, 1]
+        feats = global_feats * instance_feats.expand_as(global_feats) # TODO 1: Remove this I think is duplicating channel attention
+        fsum = torch.sum(feats, dim=1, keepdim=True) # ([num_instances, 1, 128, 128]
+        # TODO: Deberiamos aplicar esto al inico. Es como un positional embedding. Tal vez desde el inicio fuera bueno desde que comenzamos el instance information abstarction
+
+        # instance corrds (from 0 to 128)
         pixel_coords = self._get_pixel_coords((W, H), feats.device)
         relative_coords = instance_coords.reshape(
             -1, 1, 2) - pixel_coords.reshape(1, -1, 2)
@@ -425,15 +475,21 @@ class SpatialAttention(nn.Module):
             [[1.0, 1.0], [0.0, 1.0], [1.0, 0.0], [0.0, 0.0]]
             ]  # shape (1, 4, 2)
         """
-        relative_coords = relative_coords.permute(0, 2, 1) / 32.0 
-        # the channels are ordered in (dx, dy) that are  the offset to the reference point center of instance. 
+        # Relative cords shape: [num_instances, 16384 (128 x 128), 2]
+
         # Why 32? This number often comes from the stride or downsampling factor of the backbone or feature map compared to the original input image size.
+        # relative_coords = relative_coords.permute(0, 2, 1) / 32.0 # HACK: This was wrong I think because the coordinates were already in 128 x 128 no need to downsampling from original coordinates.
+        relative_coords = relative_coords.permute(0, 2, 1) / H # Normalize between 0-1
+        # the channels are ordered in (dx, dy) that are  the offset to the reference point center of instance. 
         
         relative_coords = relative_coords.reshape(B, 2, H, W)
 
-        input_feats = torch.cat((fsum, relative_coords), dim=1)
-        mask = self.conv(input_feats).sigmoid()
-        return global_feats * mask
+        input_feats = torch.cat((fsum, relative_coords), dim=1) # 3 -> 1 channel # TODO: I think that they are not using the positional encoding well. It is not well use in my opinion.
+
+        mask = self.conv(input_feats).sigmoid() # [num_instances, 1, 128, 128]
+        # global_feats = [num_instances, 32, 128, 128]
+
+        return global_feats * mask 
     
 
 
@@ -484,6 +540,9 @@ class CustomGFDModule(BaseModule):
         # TODO: CBAM ?
         # NOTE: Try: Add positional encodings to the attention module input so the model understands relative location.
         # TODO: we could change the channel attention with something more advanced.
+        # TODO: try Criss-Cross Attention (CCA)
+        # TODO: Try CBAM
+
         self.channel_attention = ChannelAttention(in_channels, gfd_channels)
         # TODO: we could change the spatial attention with something more advanced.
         self.spatial_attention = SpatialAttention(in_channels, gfd_channels, conv_type)
@@ -505,7 +564,7 @@ class CustomGFDModule(BaseModule):
         self.heatmap_conv = get_conv_operation(
             conv_type=conv_type,
             in_channels=gfd_channels,
-            out_channels=out_channels,
+            out_channels=out_channels, # num_keypoints
             # kernel_size=1)
             kernel_size=3)
         self.sigmoid = TruncSigmoid(min=clamp_delta, max=1 - clamp_delta)
@@ -532,17 +591,28 @@ class CustomGFDModule(BaseModule):
             A tensor containing decoupled heatmaps.
         """
 
-        global_feats = self.conv_down(feats)
-        global_feats = global_feats[instance_imgids]
+        # TODO: podiramos ahorrarnos el downsamplig si hacemos de mas canales la convolucion de IIA y usamos la segunda mitad
+        # feats  (b, 480, 128, 128)
+        global_feats = self.conv_down(feats) #  (b, 32, 128, 128)
+        # instance image ids: [num_instances]
+
+        # Duplicating global feats for paralelism
+        # Select the global feature maps of the images that each instance belongs to,
+        # effectively creating a per-instance batch (duplicates features if multiple
+        # instances come from the same image).
+        global_feats = global_feats[instance_imgids] # [num_instances, 32, 128, 128]
+
+         #instance_coords [num_instances, 2])
+
         cond_instance_feats = torch.cat(
-            (self.channel_attention(global_feats, instance_feats),
+            (self.channel_attention(global_feats, instance_feats), # i.e ([num_instances, 32, 128, 128], [instances, 480])
              self.spatial_attention(global_feats, instance_feats,
                                     instance_coords)),
             dim=1)
         
-        cond_instance_feats = self.fuse_attention(cond_instance_feats)
+        cond_instance_feats = self.fuse_attention(cond_instance_feats) # [num_instances, 32, 128, 128])
         cond_instance_feats = torch.nn.functional.relu(cond_instance_feats)
-        cond_instance_feats = self.heatmap_conv(cond_instance_feats)
+        cond_instance_feats = self.heatmap_conv(cond_instance_feats) # num_channels: 32 -> 19 (this is num_keypoints)    i.e. [num_instances, 19, 128, 128]
         heatmaps = self.sigmoid(cond_instance_feats)
 
         return heatmaps
@@ -765,6 +835,7 @@ class CustomHead(BaseHead):
         else:
             return preds
     
+    # HERE: 
     def loss(self,
             feats: Tuple[Tensor],
             batch_data_samples: OptSampleList,
@@ -787,7 +858,8 @@ class CustomHead(BaseHead):
         instance_imgids, gt_instance_heatmaps = [], []
         for i, d in enumerate(batch_data_samples):
             gt_heatmaps.append(d.gt_fields.heatmaps)
-            gt_instance_coords.append(d.gt_instance_labels.instance_coords)
+            gt_instance_coords.append(d.gt_instance_labels.instance_coords) # [num_instances, 2]
+            # If a keypoint is not annotated (hidden, out of the image, or marked as not visible), its weight (keypoint_weight) is set to 0.0 so that the loss ignores it.
             keypoint_weights.append(d.gt_instance_labels.keypoint_weights)
             instance_imgids.append(
                 torch.ones(
@@ -797,31 +869,37 @@ class CustomHead(BaseHead):
             instance_heatmaps = d.gt_fields.instance_heatmaps.reshape(
                 -1, self.num_keypoints,
                 *d.gt_fields.instance_heatmaps.shape[1:])
+            # instance_heatmaps = [num_instances, num_keypoints, H, W] i.e. [3, 19, 128, 128]
             gt_instance_heatmaps.append(instance_heatmaps)
 
             if 'heatmap_mask' in d.gt_fields:
                 heatmap_mask.append(d.gt_fields.heatmap_mask)
 
+        # gt_heatmaps: per-keypoint heatmaps combining all image instances
         gt_heatmaps = torch.stack(gt_heatmaps)
         heatmap_mask = torch.stack(heatmap_mask) if heatmap_mask else None
-
         gt_instance_coords = torch.cat(gt_instance_coords, dim=0)
+        # gt_instance_heatmaps: Separate per-keypoint heatmaps for each individual instance
         gt_instance_heatmaps = torch.cat(gt_instance_heatmaps, dim=0)
         keypoint_weights = torch.cat(keypoint_weights, dim=0)
         instance_imgids = torch.cat(instance_imgids).to(gt_heatmaps.device)
 
         # feed-forward
-        feats = feats[-1]
-        pred_instance_feats, pred_heatmaps = self.custom_iia_module.forward_train(
+        feats = feats[-1] # features from the backbone [3, 480, 128, 128]
+        pred_instance_feats, pred_heatmaps = self.custom_iia_module.forward_train( # [num_instances, 480], [b, 20, 128, 128]
             feats, gt_instance_coords, instance_imgids)
-
         # conpute contrastive loss
         contrastive_loss = 0
         for i in range(len(batch_data_samples)):
+            # filters pred_instance_feats to keep only the features of the instances of that image.
             pred_instance_feat = pred_instance_feats[instance_imgids == i]
-            contrastive_loss += self.loss_module['contrastive'](
+            # Hack: For each instance we apply contrastive loss. That way we can separate very well the instances.
+            contrastive_loss += self.loss_module['contrastive']( # InfoNCELoss
                 pred_instance_feat)
-        contrastive_loss = contrastive_loss / max(1, len(instance_imgids))
+        # Average over the number of total instances
+        contrastive_loss = contrastive_loss / max(1, len(instance_imgids)) # Avoid division by zero and avoid dependence on the number of instances.
+
+        # TODO: Imopelemnt contrastive learning for borders maybe.
 
         # limit the number of instances
         max_train_instances = train_cfg.get('max_train_instances', -1)
@@ -841,18 +919,24 @@ class CustomHead(BaseHead):
             pred_instance_feats = pred_instance_feats[selected_indices]
 
         # calculate the decoupled heatmaps for each instance
+        # feats = [b, 480, 128, 128]), pred_instance_feats = [instances , 480] instances = num pig in batch (in all the images)
         pred_instance_heatmaps = self.custom_gfd_module(feats, pred_instance_feats,
                                                  gt_instance_coords,
                                                  instance_imgids)
+        
 
         # calculate losses
-        losses = {
+        # pred_heatmap & gt_heatmaps = [b, 20 (keypoints + root), 128, 128]
+        #  keypoints of all instances  in each keypoint map.
+        losses = { # FocalHeatmapLoss
             'loss/heatmap_coupled':
             self.loss_module['heatmap_coupled'](pred_heatmaps, gt_heatmaps,
                                                 None, heatmap_mask)
-        }
+        } 
+
+        # pred instances & gt_instances: [num_instances, 19, 128, 128]
         if len(instance_imgids) > 0:
-            losses.update({
+            losses.update({ # FocalHeatmapLoss
                 'loss/heatmap_decoupled':
                 self.loss_module['heatmap_decoupled'](pred_instance_heatmaps,
                                                       gt_instance_heatmaps,
