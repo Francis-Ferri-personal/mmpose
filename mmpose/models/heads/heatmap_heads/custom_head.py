@@ -782,41 +782,76 @@ class CustomHead(BaseHead):
         else:
             feats = feats[-1]
 
+        
+        # Feats: [2, 480, 128, 240] 
+        # NOTE: 2 is for horizontasl flipping, and 240 instaed of 128 is because we are using resize_mode='expand' in validation. This will not affect our results because for trainning we used BottomupRandomAffine
+        # BottomupRandomAffine applies random affine transformations that keep the input size while selecting random sections of the image for augmentation.
+
         instance_info = self.custom_iia_module.forward_test(feats, test_cfg)
-        instance_feats, instance_coords, instance_scores = instance_info
+
+        instance_feats, instance_coords, instance_scores = instance_info # [pred_instances (x2 if flipped=true), 480], [pred_instances, 2] [pred_instances]
+
         if len(instance_coords) > 0:
             # It is a tensor of size [N], where each value indicates which image in the batch each instance belongs to.
             # Note here is zero because all is only one image I think
             instance_imgids = torch.zeros(
                 instance_coords.size(0), dtype=torch.long, device=feats.device)
             if test_cfg.get('flip_test', False):
+                # NOTE: We keep the same instance_corrds because at the end we flip  the final heatmaps of teh flipped verions of the images.
                 instance_coords = torch.cat((instance_coords, instance_coords))
                 instance_imgids = torch.cat(
                     (instance_imgids, instance_imgids + 1))
+            
+            # Call the custom_gfd_module module to generate decoupled heatmaps for each instance using global features, instance features, coordinates, and IDs.
             instance_heatmaps = self.custom_gfd_module(feats, instance_feats,
                                                 instance_coords,
                                                 instance_imgids)
+            # instance_heatmaps = [pred_instances (pred_instances x 2 if flip= true), 19, 128, 240])
+            
             if test_cfg.get('flip_test', False):
+                # flip_indices es una lista o tensor que indica cómo reordenar los canales del heatmap después del flip horizontal para que los keypoints correspondan correctamente. 
                 flip_indices = batch_data_samples[0].metainfo['flip_indices']
+                # flip_indices = [0, 2, 1, 4, 3, 6, 5, 8, 7, 10, 9, 12, 11, 14, 13, 16, 15, 17, 18]
                 instance_heatmaps, instance_heatmaps_flip = torch.chunk(
                     instance_heatmaps, 2, dim=0)
+                # rearranges the flipped heatmap channels so that the keypoints are in the correct order according to the horizontal flip.
                 instance_heatmaps_flip = \
                     instance_heatmaps_flip[:, flip_indices, :, :]
+                # combine the prediction of the original and flip images
                 instance_heatmaps = (instance_heatmaps +
                                      instance_heatmaps_flip) / 2.0
-            instance_heatmaps = smooth_heatmaps(
+                
+            # instance_heatmaps = [pred_instances, 19, 128, 240]
+            # instance_scores = [pred_instances]
+            instance_heatmaps = smooth_heatmaps( 
                 instance_heatmaps, test_cfg.get('blur_kernel_size', 3))
+            
 
+            # The decode function typically converts heatmaps into keypoint coordinates (e.g., by taking the maximum in the heatmap for each keypoint).
+            # The preds result contains a list or collection of keypoint predictions for each detected instance.
             preds = self.decode((instance_heatmaps, instance_scores[:, None])) # shape = [N, 1]
+            
+            # InstanceData.cat(preds) combines all individual predictions into a single object
             preds = InstanceData.cat(preds)
+            # Print the results
+            # for i, p in enumerate(preds):
+            #     print("  keypoints shape:", p.keypoints.shape)
+            #     print("  keypoint_scores shape:", p.keypoint_scores.shape)
+            # For each instance we have:
+                # keypoints shape: (1, 19, 2)
+                # keypoint_scores shape: (1, 19)
+
             # Just fitting the heatmap and predictions to the original image
+            # To correctly map the coordinates to the original image size, an offset is added.
+            # Adds half the size of a heatmap pixel
+            # NOTE: We add half the size of a pixel to the original scale to move the edge point to the center of the pixel.
             preds.keypoints[..., 0] += metainfo['input_size'][
                 0] / instance_heatmaps.shape[-1] / 2.0
             preds.keypoints[..., 1] += metainfo['input_size'][
                 1] / instance_heatmaps.shape[-2] / 2.0
             preds = [preds]
 
-        else:
+        else: # if no detections returns empty arrays
             preds = [
                 InstanceData(
                     keypoints=np.empty((0, self.num_keypoints, 2)),
@@ -825,6 +860,7 @@ class CustomHead(BaseHead):
             instance_heatmaps = torch.empty(0, self.num_keypoints,
                                             *feats.shape[-2:])
 
+        # Return heatmaps if requested
         if test_cfg.get('output_heatmaps', False):
             pred_fields = [
                 PixelData(
@@ -835,7 +871,6 @@ class CustomHead(BaseHead):
         else:
             return preds
     
-    # HERE: 
     def loss(self,
             feats: Tuple[Tensor],
             batch_data_samples: OptSampleList,
@@ -852,6 +887,7 @@ class CustomHead(BaseHead):
         Returns:
             dict: A dictionary of losses.
         """
+        print("FEATS:", feats[0].shape)
         # load targets
         gt_heatmaps, gt_instance_coords, keypoint_weights = [], [], []
         heatmap_mask = []
@@ -946,6 +982,7 @@ class CustomHead(BaseHead):
             })
 
         return losses
+    
     
     def _load_state_dict_pre_hook(self, state_dict, prefix, local_meta, *args,
                                   **kwargs):
