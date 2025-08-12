@@ -231,15 +231,17 @@ model = dict(
             prefix='backbone.',
         )),
     neck=dict(
+        # NOTE: Maybe it is a better option in a custom architecture to use CNN base (CBAM?)
+        # To use a Transformer increase the number of flops a lot.
         type='HybridEncoder',
-        in_channels=[192, 384, 768],
+        in_channels=[192, 384, 768], # P3, P4, P5
         deepen_factor=deepen_factor,
         widen_factor=widen_factor,
         hidden_dim=256,
-        output_indices=[1, 2],
+        output_indices=[1, 2], # Only use last two in_channels 384 (P4) & 768 (P5) 
         encoder_cfg=dict(
             self_attn_cfg=dict(embed_dims=256, num_heads=8, dropout=0.0),
-            ffn_cfg=dict(
+            ffn_cfg=dict( #FFN  of the transformer
                 embed_dims=256,
                 feedforward_channels=1024,
                 ffn_drop=0.0,
@@ -251,11 +253,11 @@ model = dict(
             out_channels=384,
             act_cfg=None,
             norm_cfg=dict(type='BN'),
-            num_outs=2)),
+            num_outs=2)), # Output for P4 & P5
     head=dict(
         type='RTMOHead',
         num_keypoints=19,
-        featmap_strides=(16, 32),
+        featmap_strides=(16, 32), # P4 and P5 downsampling rates of 16 and 32.
         head_module_cfg=dict(
             num_classes=1,
             in_channels=256,
@@ -267,11 +269,11 @@ model = dict(
             norm_cfg=dict(type='BN', momentum=0.03, eps=0.001),
             act_cfg=dict(type='Swish')),
         assigner=dict(
-            type='SimOTAAssigner',
+            type='SimOTAAssigner', # Uses SimOTA, a dynamic cost-based allocation algorithm.
             dynamic_k_indicator='oks',
             oks_calculator=dict(type='PoseOKS', metainfo=metafile)),
         prior_generator=dict(
-            type='MlvlPointGenerator',
+            type='MlvlPointGenerator', # Create points at P4 and P5 as the center of each cell
             centralize_points=True,
             strides=[16, 32]),
         dcc_cfg=dict(
@@ -279,7 +281,7 @@ model = dict(
             feat_channels=128,
             num_bins=(192, 256),
             spe_channels=128,
-            gau_cfg=dict(
+            gau_cfg=dict( # Gated Attention Unit (GAU), light attention module
                 s=128,
                 expansion_factor=2,
                 dropout_rate=0.0,
@@ -288,7 +290,7 @@ model = dict(
                 pos_enc='add')),
         overlaps_power=0.5,
         loss_cls=dict(
-            type='VariFocalLoss',
+            type='VariFocalLoss', # weighted according to difficulty and actual score (useful for detection). TODO: Understand it better
             reduction='sum',
             use_target_weight=True,
             loss_weight=1.0),
@@ -299,24 +301,25 @@ model = dict(
             reduction='sum',
             loss_weight=5.0),
         loss_oks=dict(
-            type='OKSLoss',
+            type='OKSLoss', # keypoint heatmap (proxy branch)
             reduction='none',
             metainfo=metafile,
             loss_weight=30.0),
         loss_vis=dict(
-            type='BCELoss',
+            type='BCELoss', # BCE (binary cross-entropy) for each visible/non-visible keypoint
             use_target_weight=True,
             reduction='mean',
             loss_weight=1.0),
         loss_mle=dict(
-            type='MLECCLoss',
+            type='MLECCLoss', # MLECCLoss: Maximum likelihood loss (as explained in the paper), learns the variance.
             use_target_weight=True,
             loss_weight=1e-2,
         ),
-        loss_bbox_aux=dict(type='L1Loss', reduction='sum', loss_weight=1.0),
+        loss_bbox_aux=dict(type='L1Loss', reduction='sum', loss_weight=1.0), # L1Loss for the box predicted by the auxiliary branch (proxy)
     ),
     test_cfg=dict(
         input_size=input_size,
-        score_thr=0.1,
+        score_thr=0.1, # Minimum score threshold to maintain a prediction
         nms_thr=0.65,
     ))
+

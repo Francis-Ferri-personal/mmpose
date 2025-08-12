@@ -338,6 +338,8 @@ class YOLOXPoseHead(BaseModule):
         # 3.1 objectness loss
         losses = dict()
 
+        # HERE:
+
         obj_preds = flatten_objectness.view(-1, 1)
         losses['loss_obj'] = self.loss_obj(obj_preds, obj_targets,
                                            obj_weights) / num_total_samples
@@ -394,7 +396,7 @@ class YOLOXPoseHead(BaseModule):
         batch_decoded_bboxes: Tensor,
         batch_decoded_kpts: Tensor,
         batch_kpt_vis: Tensor,
-        batch_data_samples: SampleList,
+        batch_data_samples: SampleList, # Ground truth
     ):
         num_imgs = len(batch_data_samples)
 
@@ -425,16 +427,34 @@ class YOLOXPoseHead(BaseModule):
         foreground_masks, cls_targets, obj_targets, obj_weights, \
             bbox_targets, kpt_targets, vis_targets, vis_weights, pos_areas, \
             pos_priors, group_indices, num_pos_per_img = targets
+        
+        # bbox_targets.shape = [instances_in_batch, 4]
 
         # post-processing for targets
         if self.use_aux_loss:
-            bbox_cxcy = (bbox_targets[:, :2] + bbox_targets[:, 2:]) / 2.0
+            bbox_cxcy = (bbox_targets[:, :2] + bbox_targets[:, 2:]) / 2.0 # centers
             bbox_wh = bbox_targets[:, 2:] - bbox_targets[:, :2]
+            #  pos_priors = (cx, cy, w, h)
+            # Calculates how much the center of the target box shifts relative to the center of the prior.
+            # Divide by the size of the prior to normalize it
+
+            # transform to relative coordinates
+            """
+                Example:
+                If the prior is at (100, 100, 50, 60) and the real box is at (110, 105, ...)
+                → displacement in x = (110 - 100) / 50 = 0.2
+                → displacement in y = (105 - 100) / 60 ≈ 0.083.
+            """
+            # HACK: Calculate how much larger or smaller the target box is compared to the prior. This is an intelligent way to keep the spatial relation bettween prior and bbox
             bbox_aux_targets = torch.cat([
                 (bbox_cxcy - pos_priors[:, :2]) / pos_priors[:, 2:],
-                torch.log(bbox_wh / pos_priors[:, 2:] + 1e-8)
+                
+                torch.log(bbox_wh / pos_priors[:, 2:] + 1e-8) # 1e-8 is a very small value to avoid log(0)
             ],
                                          dim=-1)
+            # You calculate: displacements (dx, dy) and scales (sc_w, sc_dh)
+            # bbox_aux_targets = [[(dx, dy),(sc_w, sc_dh)], ...]
+                                         
 
             kpt_aux_targets = (kpt_targets - pos_priors[:, None, :2]) \
                 / pos_priors[:, None, 2:]
@@ -513,15 +533,16 @@ class YOLOXPoseHead(BaseModule):
             kpt_target = cls_scores.new_zeros((0, self.num_keypoints, 2))
             vis_target = cls_scores.new_zeros((0, self.num_keypoints))
             vis_weight = cls_scores.new_zeros((0, self.num_keypoints))
-            pos_areas = cls_scores.new_zeros((0, ))
-            pos_priors = priors[:0]
-            foreground_mask = cls_scores.new_zeros(num_priors).bool()
+            pos_areas = cls_scores.new_zeros((0, )) # no elements detected 
+            pos_priors = priors[:0] # It is a way to select an empty slice from the beginning, so it is an empty tensor with the same shape
+            foreground_mask = cls_scores.new_zeros(num_priors).bool() # A tensor of False with num_priors size 
             return (foreground_mask, cls_target, obj_target, obj_weight,
                     bbox_target, kpt_target, vis_target, vis_weight, pos_areas,
                     pos_priors, [], 0)
 
         # assign positive samples
-        scores = cls_scores * objectness
+        # Combines class probability with objectness score to compute a more reliable confidence measure, crucial for accurately assigning positive samples during training.
+        scores = cls_scores * objectness 
         pred_instances = InstanceData(
             bboxes=decoded_bboxes,
             scores=scores.sqrt_(),
@@ -529,18 +550,36 @@ class YOLOXPoseHead(BaseModule):
             keypoints=decoded_kpts,
             keypoints_visible=kpt_vis,
         )
+
         assign_result = self.assigner.assign(
             pred_instances=pred_instances, gt_instances=gt_instances)
 
         # sampling
-        pos_inds = torch.nonzero(
+        pos_inds = torch.nonzero( # In assign_result['gt_inds'], the value at that position indicates the GT index assigned to that prior.
             assign_result['gt_inds'] > 0, as_tuple=False).squeeze(-1).unique()
         num_pos_per_img = pos_inds.size(0)
         pos_gt_labels = assign_result['labels'][pos_inds]
-        pos_assigned_gt_inds = assign_result['gt_inds'][pos_inds] - 1
+        pos_assigned_gt_inds = assign_result['gt_inds'][pos_inds] - 1 # -1 is to start from 0 instead of 1
 
         # bbox target
-        bbox_target = gt_instances.bboxes[pos_assigned_gt_inds.long()]
+        bbox_target = gt_instances.bboxes[pos_assigned_gt_inds.long()] # [num_instances (in batch), 4]
+        
+        #  NOTE: HACK: it semes that the GT values are (xmin, ymin, xmax, ymax)
+        
+        # bbox_target.shape =  [num_instances, 4]
+        # Example of values: 
+        # bbox_target
+        # [ 80.1272,   0.0000, 391.6619,  25.1820],
+        # [ 80.1272,   0.0000, 391.6619,  25.1820],
+        # [ 80.1272,   0.0000, 391.6619,  25.1820],
+
+        # NOTE: check this. Algunas implementaciones usan valores negativos (ej. -0.9, -1) para rellenar o marcar regiones inválidas, fuera de la imagen o que no tienen GT asignado.????
+        # I think that this negative values are offsets from the center of the prior thast why it can be negative. 
+        # tensor([[ -1.1500, 258.0327,  87.7823, 343.5746],
+        # [410.2996, 201.1497, 631.2483, 391.2306],
+        # [ -1.1500, 258.0327,  87.7823, 343.5746],
+        # [410.2996, 201.1497, 631.2483, 391.2306],
+        # [ -1.1500, 258.0327,  87.7823, 343.5746],
 
         # cls target
         max_overlaps = assign_result['max_overlaps'][pos_inds]
@@ -578,6 +617,7 @@ class YOLOXPoseHead(BaseModule):
             obj_weight = obj_target.new_ones(obj_target.shape)
 
         # misc
+        # HACK: You can try to use this foreground mask for your idea of borders
         foreground_mask = torch.zeros_like(objectness.squeeze()).to(torch.bool)
         foreground_mask[pos_inds] = 1
         pos_priors = priors[pos_inds]

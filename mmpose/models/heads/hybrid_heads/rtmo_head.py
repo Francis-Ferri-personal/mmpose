@@ -37,8 +37,14 @@ class RTMOHeadModule(BaseModule):
             and objectness prediction branch. Defaults to 256.
          widen_factor (float): Width multiplier, multiply number of
              channels in each layer by this amount. Defaults to 1.0.
+             
+        HACK: If you use this well maybe you can reduce flops
+        RTMO Uses group conv to generate pose vectors per keypoint more efficiently (e.g., to obtain K × pose_vec_channels separately)
+        HACK: You can create seoparate channels perkepoint. 
+        
         num_groups (int): Group number of group convolution layers in keypoint
             regression branch. Defaults to 8.
+        
         channels_per_group (int): Number of channels for each group of group
             convolution layers in keypoint regression branch. Defaults to 32.
         featmap_strides (Sequence[int]): Downsample factor of each feature
@@ -77,29 +83,28 @@ class RTMOHeadModule(BaseModule):
     ):
         super().__init__(init_cfg=init_cfg)
         self.num_classes = num_classes
-        self.cls_feat_channels = int(cls_feat_channels * widen_factor)
-        self.stacked_convs = stacked_convs
+        self.cls_feat_channels = int(cls_feat_channels * widen_factor) # How much it will expand the dimensions in intermediate convs
+        self.stacked_convs = stacked_convs # how many convolutional layers are stacked inside a small subnetwork of the head
         assert conv_bias == 'auto' or isinstance(conv_bias, bool)
         self.conv_bias = conv_bias
 
         self.conv_cfg = conv_cfg
         self.norm_cfg = norm_cfg
         self.act_cfg = act_cfg
-        self.featmap_strides = featmap_strides
+        self.featmap_strides = featmap_strides # 
 
         self.in_channels = int(in_channels * widen_factor)
-        self.num_keypoints = num_keypoints
-
+        self.num_keypoints = num_keypoints        
         self.num_groups = num_groups
-        self.channels_per_group = int(widen_factor * channels_per_group)
-        self.pose_vec_channels = pose_vec_channels
+        self.channels_per_group = int(widen_factor * channels_per_group) # Channels per group
+        self.pose_vec_channels = pose_vec_channels # # number of feature channels used for pose/keypoint representation before prediction
 
         self._init_layers()
 
     def _init_layers(self):
         """Initialize heads for all level feature maps."""
-        self._init_cls_branch()
-        self._init_pose_branch()
+        self._init_cls_branch() # Objectness score (is there a pig here?) + Bounding box
+        self._init_pose_branch() # Keypoint coords + visibility
 
     def _init_cls_branch(self):
         """Initialize classification branch for all level feature maps."""
@@ -125,7 +130,7 @@ class RTMOHeadModule(BaseModule):
         self.out_cls = nn.ModuleList()
         for _ in self.featmap_strides:
             self.out_cls.append(
-                nn.Conv2d(self.cls_feat_channels, self.num_classes, 1))
+                nn.Conv2d(self.cls_feat_channels, self.num_classes, 1)) # One feature map per class
 
     def _init_pose_branch(self):
         """Initialize pose prediction branch for all level feature maps."""
@@ -151,15 +156,30 @@ class RTMOHeadModule(BaseModule):
             self.conv_pose.append(nn.Sequential(*stacked_convs))
 
         # output layers
+        # TODO:
+        # HACK: Yo can use the bbox regression and the visibility regression into CID
         self.out_bbox = nn.ModuleList()
         self.out_kpt_reg = nn.ModuleList()
         self.out_kpt_vis = nn.ModuleList()
-        for _ in self.featmap_strides:
-            self.out_bbox.append(nn.Conv2d(out_chn, 4, 1))
+        for _ in self.featmap_strides: # for thed different outputs P4 & P5
+            """
+                NOTE: Each location in the feature map acts like an "anchor" that outputs predictions for a potential person centered at that location.
+                (THIS IS WHAT HAPPENS IN CiD IIA)
+                
+                ✅ Why it works (and why it's not inaccurate)
+                1. Only some pixels are responsible for predicting real objects
+                Not every pixel's prediction is used.
+
+                The model learns to activate only where people are likely to be centered (similar to YOLO).
+
+                During training, only a small number of positions are assigned to real people via SimOTAAssigner using OKS (keypoint-based matching).
+            """
+            self.out_bbox.append(nn.Conv2d(out_chn, 4, 1)) # 4 means x, y, w, h # NOTE: I dont like this approach of 1x1 convs. Maybe it is lossing important information
             self.out_kpt_reg.append(
                 nn.Conv2d(out_chn, self.num_keypoints * 2, 1))
             self.out_kpt_vis.append(nn.Conv2d(out_chn, self.num_keypoints, 1))
 
+        # TODO: HACK: It could be interesting to conbien teh output at multiple resolutions like RTMO does
         if self.pose_vec_channels > 0:
             self.out_pose = nn.ModuleList()
             for _ in self.featmap_strides:
@@ -196,9 +216,13 @@ class RTMOHeadModule(BaseModule):
         kpt_offsets, kpt_vis = [], []
         pose_feats = []
 
-        for i in range(len(x)):
+        for i in range(len(x)): # P4 = 384, P5 = 768
+            # feats: x[i] => [3, 384, 46, 46]
 
-            cls_feat, reg_feat = x[i].split(x[i].size(1) // 2, 1)
+            # NOTE: if x is the backbone features. we are losing information if we dont apply a conv before separating the channels
+
+            # Divide the tensor into 2. Haft of the channels for cls and half for reg
+            cls_feat, reg_feat = x[i].split(x[i].size(1) // 2, 1) # cls_feat, reg_feat = [3, 192, 46, 46], [3, 192, 46, 46]
 
             cls_feat = self.conv_cls[i](cls_feat)
             reg_feat = self.conv_pose[i](reg_feat)
@@ -699,17 +723,28 @@ class RTMOHead(YOLOXPoseHead):
         featmap_strides: Sequence[int] = [16, 32],
         num_classes: int = 1,
         use_aux_loss: bool = False,
+        # proxy_target_cc: flag to decide if the regression branch refines coordinate-classification (DCC) predictions instead of raw GT keypoints for tighter branch consistency
         proxy_target_cc: bool = False,
+        # assigner: training-time matcher that pairs predicted poses with ground truth using OKS-based SimOTA for optimal supervision
         assigner: ConfigType = None,
+        # prior_generator: multi-level point grid generator that defines spatial anchor locations (priors) on each feature map stride for prediction heads
         prior_generator: ConfigType = None,
         bbox_padding: float = 1.25,
-        overlaps_power: float = 1.0,
+        
+        # overlaps_power: exponent applied to the OKS/IoU overlap scores to adjust their influence when weighting prediction-target assignments or losses
+        # Raises the OKS overlaps to the power of overlaps_power.
+        # For example:
+        # - If overlaps_power > 1, higher overlaps get more emphasis (e.g., 0.9^2 = 0.81),
+        #   making the model focus more on very accurate predictions.
+        # - If overlaps_power < 1, lower overlaps are boosted (e.g., 0.4^0.5 ≈ 0.63),
+        #   giving more weight to less confident predictions.
+        overlaps_power: float = 1.0, 
         dcc_cfg: Optional[ConfigType] = None,
         loss_cls: Optional[ConfigType] = None,
         loss_bbox: Optional[ConfigType] = None,
         loss_oks: Optional[ConfigType] = None,
         loss_vis: Optional[ConfigType] = None,
-        loss_mle: Optional[ConfigType] = None,
+        loss_mle: Optional[ConfigType] = None, # Loss that applies Maximum Likelihood Estimation to model keypoint coordinates and their uncertainty
         loss_bbox_aux: Optional[ConfigType] = None,
     ):
         super().__init__(
@@ -765,26 +800,56 @@ class RTMOHead(YOLOXPoseHead):
         # 1. collect & reform predictions
         cls_scores, bbox_preds, kpt_offsets, kpt_vis, pose_vecs = self.forward(
             feats)
+        
+        # print("K-point offsets",  kpt_offsets[0].shape) # [batch_zise, 38 (num_keypoints * 2 (for x and y)), 40, 40] (spatial dims = 40 x 40 at that level)
 
         featmap_sizes = [cls_score.shape[2:] for cls_score in cls_scores]
-        mlvl_priors = self.prior_generator.grid_priors(
+        # generates all the reference points (priors) for each scale of the network, placing them in a grid over the image, with their position and stride, ready to be used to decode the predictions (as bboxes or keypoints).
+        mlvl_priors = self.prior_generator.grid_priors( #[x_centre, y_centre, stride_w, stride_h]
             featmap_sizes,
             dtype=cls_scores[0].dtype,
             device=cls_scores[0].device,
             with_stride=True)
+        # mlvl_priors = [2500 (i.e 50 x 50), 4], [625 (i.e. 25 x 25), 4] # NOTE: it adds the  strides when with_strides
+
+        # last_prior = mlvl_priors[-1]
+
+        # print("Shape:", last_prior.shape)  [num_priors (middle points in grid), 4 (centers & strides)]i.e. [400, 4]
+        # print("content (first 10 rows):\n", last_prior[:10])
+        # i.e: tensor([[ 15.5000,  15.5000,  32.0000,  32.0000],
+        # [ 47.5000,  15.5000,  32.0000,  32.0000],
+
+
+        # x_min = last_prior[:, 0].min().item()
+        # x_max = last_prior[:, 0].max().item()
+        # y_min = last_prior[:, 1].min().item()
+        # y_max = last_prior[:, 1].max().item()
+
+        # print(f"x_min: {x_min}, x_max: {x_max}")
+        # print(f"y_min: {y_min}, y_max: {y_max}")
+        # x_min: 15.5, x_max: 623.5
+        # y_min: 15.5, y_max: 623.5
+        
+        # The feature map is 640 x 640
+
         flatten_priors = torch.cat(mlvl_priors)
 
         # flatten cls_scores, bbox_preds and objectness
         flatten_cls_scores = self._flatten_predictions(cls_scores)
         flatten_bbox_preds = self._flatten_predictions(bbox_preds)
+        
+        # Goes from [N, num_classes] to [N, 1]. Creates an objectness tensor with shape [N, 1], filled with a high constant (1e4),
+        # forcing all priors to be considered as containing objects regardless of predictions.
         flatten_objectness = torch.ones_like(
             flatten_cls_scores).detach().narrow(-1, 0, 1) * 1e4
+        
         flatten_kpt_offsets = self._flatten_predictions(kpt_offsets)
         flatten_kpt_vis = self._flatten_predictions(kpt_vis)
         flatten_pose_vecs = self._flatten_predictions(pose_vecs)
+        # It is the function that transforms the relative predictions (offsets) of the boxes into absolute coordinates in the image
         flatten_bbox_decoded = self.decode_bbox(flatten_bbox_preds,
-                                                flatten_priors[..., :2],
-                                                flatten_priors[..., -1])
+                                                flatten_priors[..., :2], # x, y per prior
+                                                flatten_priors[..., -1]) #strides
         flatten_kpt_decoded = self.decode_kpt_reg(flatten_kpt_offsets,
                                                   flatten_priors[..., :2],
                                                   flatten_priors[..., -1])
@@ -817,11 +882,17 @@ class RTMOHead(YOLOXPoseHead):
 
             # 3.1 bbox loss
             bbox_preds = flatten_bbox_decoded.view(-1, 4)[pos_masks]
-            losses['loss_bbox'] = self.loss_bbox(
+            # bbox_preds =[num_instances, 4]
+            # bbox_targets = [num_instances, 4]
+            # Targets example: (x1,y1,x2,y2)
+                # [439.8983,  72.7144, 632.7180, 188.4785],
+                # [439.8983,  72.7144, 632.7180, 188.4785],
+
+            losses['loss_bbox'] = self.loss_bbox( # IoULoss, squared
                 bbox_preds, bbox_targets) / num_total_samples
 
             if self.use_aux_loss:
-                if hasattr(self, 'loss_bbox_aux'):
+                if hasattr(self, 'loss_bbox_aux'): # L1Loss
                     bbox_preds_raw = flatten_bbox_preds.view(-1, 4)[pos_masks]
                     losses['loss_bbox_aux'] = self.loss_bbox_aux(
                         bbox_preds_raw, bbox_aux_targets) / num_total_samples
@@ -836,6 +907,7 @@ class RTMOHead(YOLOXPoseHead):
             kpt_reg_preds = flatten_kpt_decoded.view(-1, self.num_keypoints,
                                                      2)[pos_masks]
 
+            # generates heatmaps for the bbox. NOTE: THis is a top down approach. not 100% but almost
             if hasattr(self, 'loss_mle') and self.loss_mle.loss_weight > 0:
                 pose_vecs = flatten_pose_vecs.view(
                     -1, flatten_pose_vecs.size(-1))[pos_masks]
@@ -851,13 +923,13 @@ class RTMOHead(YOLOXPoseHead):
                 losses['loss_mle'] = self.loss_mle(pred_hms, target_hms,
                                                    vis_targets)
 
-            if self.proxy_target_cc:
+            if self.proxy_target_cc: # is enabled, the regression does not directly take the real targets, but builds its objective from the predictions of coordinate classification.
                 # form the regression target using the coordinate
                 # classification predictions
-                with torch.no_grad():
+                with torch.no_grad(): # We don't want the target calculation to generate gradients, because it is only to prepare the training target.
                     diff_cc = torch.norm(kpt_cc_preds - kpt_targets, dim=-1)
                     diff_reg = torch.norm(kpt_reg_preds - kpt_targets, dim=-1)
-                    mask = (diff_reg > diff_cc).float()
+                    mask = (diff_reg > diff_cc).float() # 1 where regression is worse than classification (diff_reg > diff_cc), 0 otherwise.
                     kpt_weights_reg = vis_targets * mask
                     oks = self.assigner.oks_calculator(kpt_cc_preds,
                                                        kpt_targets,
@@ -886,7 +958,7 @@ class RTMOHead(YOLOXPoseHead):
             obj_weights[pos_masks] = cls_targets.to(obj_weights)
 
         # 3.4 classification loss
-        losses['loss_cls'] = self.loss_cls(cls_preds_all, obj_targets,
+        losses['loss_cls'] = self.loss_cls(cls_preds_all, obj_targets, # VariFocalLoss
                                            obj_weights) / num_total_samples
         losses.update(extra_info)
 
