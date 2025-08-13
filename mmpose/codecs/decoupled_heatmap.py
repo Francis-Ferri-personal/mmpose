@@ -29,14 +29,14 @@ class DecoupledHeatmap(BaseKeypointCodec):
 
     Encoded:
         - heatmaps (np.ndarray): The coupled heatmap in shape
-            (1+K, H, W) where [W, H] is the `heatmap_size`.
+            (1+K, H, W) where [W, H] is the `heatmap_size`. # the 1+ k is because the root heatmap
+        (maybe is m*(k+1))?
         - instance_heatmaps (np.ndarray): The decoupled heatmap in shape
             (M*K, H, W) where M is the number of instances.
         - keypoint_weights (np.ndarray): The weight for heatmaps in shape
             (M*K).
         - instance_coords (np.ndarray): The coordinates of instance roots
             in shape (M, 2)
-
     Args:
         input_size (tuple): Image size in [w, h]
         heatmap_size (tuple): Heatmap size in [W, H]
@@ -49,8 +49,13 @@ class DecoupledHeatmap(BaseKeypointCodec):
 
             Defaults to ``'kpt_center'``
 
+        # Minimum IoU threshold to control Gaussian size in heatmaps, affecting tolerance to instance overlap.
         heatmap_min_overlap (float): Minimum overlap rate among instances.
+        # Here it means that the gaussian has to cover at least 7% of the area of the bbox
             Used when calculating sigmas for instances. Defaults to 0.7
+
+        
+        # Lower weight for background pixels to prevent the loss from being dominated by background regions
         background_weight (float): Loss weight of background pixels.
             Defaults to 0.1
         encode_max_instances (int): The maximum number of instances
@@ -105,7 +110,7 @@ class DecoupledHeatmap(BaseKeypointCodec):
         Returns:
             np.ndarray: Array containing the sigma values for each instance.
         """
-        sigmas = np.zeros((bbox.shape[0], ), dtype=np.float32)
+        sigmas = np.zeros((bbox.shape[0], ), dtype=np.float32) # for each instance
 
         heights = np.sqrt(np.power(bbox[:, 0] - bbox[:, 1], 2).sum(axis=-1))
         widths = np.sqrt(np.power(bbox[:, 0] - bbox[:, 2], 2).sum(axis=-1))
@@ -135,6 +140,7 @@ class DecoupledHeatmap(BaseKeypointCodec):
             sq3 = np.sqrt(b3**2 - 4 * a3 * c3)
             r3 = (b3 + sq3) / 2
 
+            # Takes the smallest radius from the three cases, divides by 3 (shrinks it), and stores it.
             sigmas[i] = min(r1, r2, r3) / 3
 
         return sigmas
@@ -155,9 +161,9 @@ class DecoupledHeatmap(BaseKeypointCodec):
         Returns:
             dict:
             - heatmaps (np.ndarray): The coupled heatmap in shape
-                (1+K, H, W) where [W, H] is the `heatmap_size`.
+                (1+K, H, W) where [W, H] is the `heatmap_size`. # Extra one due to root
             - instance_heatmaps (np.ndarray): The decoupled heatmap in shape
-                (N*K, H, W) where M is the number of instances.
+                (N*K, H, W) where M is the number of instances. # NOTE: probably + 1
             - keypoint_weights (np.ndarray): The weight for heatmaps in shape
                 (N*K).
             - instance_coords (np.ndarray): The coordinates of instance roots
@@ -171,7 +177,8 @@ class DecoupledHeatmap(BaseKeypointCodec):
             bbox = get_instance_bbox(keypoints, keypoints_visible)
             bbox = np.tile(bbox, 2).reshape(-1, 4, 2)
             # corner order: left_top, left_bottom, right_top, right_bottom
-            bbox[:, 1:3, 0] = bbox[:, 0:2, 0]
+            bbox[:, 1:3, 0] = bbox[:, 0:2, 0] # Copy x-coordinates from points 0–1 to points 1–2 to align bounding box edges vertically
+
 
         # keypoint coordinates in heatmap
         _keypoints = keypoints / self.scale_factor
@@ -194,11 +201,14 @@ class DecoupledHeatmap(BaseKeypointCodec):
 
         # select instances
         inst_roots, inst_indices = [], []
+        # Calculates the diagonal length of the smallest rectangle covering all visible keypoints for each instance.
         diagonal_lengths = get_diagonal_lengths(_keypoints, keypoints_visible)
+
         for i in np.argsort(diagonal_lengths):
             if roots_visible[i] < 1:
                 continue
             # rand root point in 3x3 grid
+            # Randomly jitters the root point within a 3x3 grid around the original location, clamped to heatmap boundaries.
             x, y = roots[i] + np.random.randint(-1, 2, (2, ))
             x = max(0, min(x, self.heatmap_size[0] - 1))
             y = max(0, min(y, self.heatmap_size[1] - 1))
@@ -216,6 +226,7 @@ class DecoupledHeatmap(BaseKeypointCodec):
         for i in inst_indices:
             inst_heatmap, inst_heatmap_weight = generate_gaussian_heatmaps(
                 heatmap_size=self.heatmap_size,
+                # Uses [i:i + 1] slicing to select the i-th element as a sub-array while preserving the original array’s number of dimensions.
                 keypoints=_keypoints[i:i + 1],
                 keypoints_visible=keypoints_visible[i:i + 1],
                 sigma=sigmas[i].item())
