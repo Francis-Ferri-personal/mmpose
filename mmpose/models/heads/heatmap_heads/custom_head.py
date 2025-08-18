@@ -114,6 +114,39 @@ def get_conv_operation(
     
     return build_conv_layer(layer_config)
 
+class FeatureExtractor:
+    # TODO: Why only an index and not a gaussian (circle around the center of the instance). Maybe it is to optimize computations.
+    @staticmethod
+    def sample_feats(feats: Tensor, indices: Tensor) -> Tensor:
+        """Extract feature vectors at the specified indices from the input
+        feature map.
+
+        Args:
+            feats (Tensor): Input feature map.
+            indices (Tensor): Indices of the feature vectors to extract.
+
+        Returns:
+            Tensor: Extracted feature vectors.
+        """
+        assert indices.dtype == torch.long
+        if indices.shape[1] == 3:
+            b, w, h = [ind.squeeze(-1) for ind in indices.split(1, -1)] 
+
+            instance_feats = feats[b, :, h, w]
+        elif indices.shape[1] == 2:
+            w, h = [ind.squeeze(-1) for ind in indices.split(1, -1)]
+            instance_feats = feats[:, :, h, w]
+            instance_feats = instance_feats.permute(0, 2, 1)
+            instance_feats = instance_feats.reshape(-1,
+                                                    instance_feats.shape[-1])
+
+        else:
+            raise ValueError(f'`indices` should have 2 or 3 channels, '
+                             f'but got f{indices.shape[1]}')
+        
+        return instance_feats
+    
+    
 
 # TODO: Rename it as OIIA for Optimized or UIIA
 class CustomIIAModule(BaseModule):
@@ -194,40 +227,9 @@ Si sabes qué tipo de instancia es (humano, animal, tipo de postura...), puedes 
         """
 
     def forward(self, feats: Tensor):
-        # print("HERE:", feats.shape)
         heatmaps = self.keypoint_root_conv(feats)
-        # print("HERE:", heatmaps.shape)
         heatmaps = self.sigmoid(heatmaps)
         return heatmaps
-    
-    # TODO: Why only an index and not a gaussian (circle around the center of the instance). Maybe it is to optimize computations.
-    def _sample_feats(self, feats: Tensor, indices: Tensor) -> Tensor:
-        """Extract feature vectors at the specified indices from the input
-        feature map.
-
-        Args:
-            feats (Tensor): Input feature map.
-            indices (Tensor): Indices of the feature vectors to extract.
-
-        Returns:
-            Tensor: Extracted feature vectors.
-        """
-        assert indices.dtype == torch.long
-        if indices.shape[1] == 3:
-            b, w, h = [ind.squeeze(-1) for ind in indices.split(1, -1)] 
-
-            instance_feats = feats[b, :, h, w]
-        elif indices.shape[1] == 2:
-            w, h = [ind.squeeze(-1) for ind in indices.split(1, -1)]
-            instance_feats = feats[:, :, h, w]
-            instance_feats = instance_feats.permute(0, 2, 1)
-            instance_feats = instance_feats.reshape(-1,
-                                                    instance_feats.shape[-1])
-
-        else:
-            raise ValueError(f'`indices` should have 2 or 3 channels, '
-                             f'but got f{indices.shape[1]}')
-        return instance_feats
     
 
     def _hierarchical_pool(self, heatmaps: Tensor) -> Tensor:
@@ -270,9 +272,9 @@ Si sabes qué tipo de instancia es (humano, animal, tipo de postura...), puedes 
             Tuple[Tensor, Tensor]: Extracted feature vectors and heatmaps
                 for the instances.
         """
-        heatmaps = self.forward(feats) # (b, c, 128, 128) i.e [6, 32, 128, 128]
+        heatmaps = self.forward(feats) # (b, c, 128, 128) i.e [6, 20 (num_keypoints + 1), 128, 128]
         indices = torch.cat((instance_imgids[:, None], instance_coords), dim=1)  # (samples in batch, 3) 3 is for img idx, x and y
-        instance_feats = self._sample_feats(feats, indices) # (samples in batch (instances), channel in features) i.e (instances, 480)
+        instance_feats = FeatureExtractor.sample_feats(feats, indices) # (samples in batch (instances), channel in features) i.e (instances, 480)
         # print("iNSTANCE FEATS shape: ", instance_feats.shape) 
 
         return instance_feats, heatmaps
@@ -340,7 +342,7 @@ Si sabes qué tipo de instancia es (humano, animal, tipo de postura...), puedes 
         # Get features at that position
         # TODO: We should try the gaussian thing that I propose to have a region around the center of the instance.
         # TODO: Adaptive convolution could also be useful. Although I think the whole attention part is done later in the other module.
-        instance_feats = self._sample_feats(feats, instance_coords)
+        instance_feats = FeatureExtractor.sample_feats(feats, instance_coords)
 
         return instance_feats, instance_coords, scores
 
@@ -631,15 +633,18 @@ class CustomHead(BaseHead):
                  gfd_channels: int,
                  num_keypoints: int,
                  prior_prob: float = 0.01,
+                 use_bbox: bool =  True,
                  # TODO: Check loses
                  coupled_heatmap_loss: OptConfigType = dict(
                      type='FocalHeatmapLoss'),
                  decoupled_heatmap_loss: OptConfigType = dict(
                      type='FocalHeatmapLoss'),
                  contrastive_loss: OptConfigType = dict(type='InfoNCELoss'),
+                 bbox_loss: OptConfigType = dict(type='IoULoss'), # IoULoss, squared
 
                  # My customizations
                  conv_type: str = 'Conv2d',
+                 bbox_format: str = 'x1y1x2y2',
 
                  decoder: OptConfigType = None,
                  init_cfg: OptConfigType = None):
@@ -650,6 +655,9 @@ class CustomHead(BaseHead):
         super().__init__(init_cfg)
         self.in_channels = in_channels
         self.num_keypoints = num_keypoints
+
+        self.use_bbox = use_bbox
+
         if decoder is not None:
             self.decoder = KEYPOINT_CODECS.build(decoder)
         else:
@@ -657,15 +665,25 @@ class CustomHead(BaseHead):
 
         # My customizations
         self.conv_type = conv_type
+        self.bbox_format = decoder["bbox_format"]
 
         # Initialize bias so that sigmoid output starts near prior_prob (e.g., 1%) to stabilize early training
         # prior_prob is the expected probability of a positive prediction (e.g., keypoint) before training starts.
         bias_value = -math.log((1 - prior_prob) / prior_prob)
 
+        # Add bbox channels if needed 
+        out_channels = num_keypoints + 1 # (+ root)
+        if self.use_bbox:
+            out_channels = num_keypoints + 5 # (+ root, x1, y1, x2, y2)
+            if self.bbox_format == 'ltwh':
+                out_channels = num_keypoints + 5 # (+ root, l, t, w, h)
+            elif self.bbox_format == 'wh':
+                out_channels = num_keypoints + 3 # (+ root, w, h)
+        
         self.custom_iia_module = CustomIIAModule(
             in_channels,
             # TODO: check why did they use num_keypoints + 1
-            num_keypoints + 1,
+            out_channels,
             init_cfg=init_cfg + [
                 # This dictionary seems the default do not pay attention to Linear
                 dict(
@@ -701,6 +719,7 @@ class CustomHead(BaseHead):
                 heatmap_coupled=MODELS.build(coupled_heatmap_loss),
                 heatmap_decoupled=MODELS.build(decoupled_heatmap_loss),
                 contrastive=MODELS.build(contrastive_loss),
+                bbox=MODELS.build(bbox_loss)
             ))
         
         
@@ -887,13 +906,14 @@ class CustomHead(BaseHead):
         Returns:
             dict: A dictionary of losses.
         """
-        print("FEATS:", feats[0].shape)
+        # print("FEATS:", feats[0].shape)
         # load targets
         gt_heatmaps, gt_instance_coords, keypoint_weights = [], [], []
         heatmap_mask = []
-        instance_imgids, gt_instance_heatmaps = [], []
+
+        instance_imgids, gt_instance_heatmaps, gt_instance_bbox  = [], [], []
         for i, d in enumerate(batch_data_samples):
-            gt_heatmaps.append(d.gt_fields.heatmaps)
+            gt_heatmaps.append(d.gt_fields.heatmaps) # [20 (num_keypoints + root), 128, 128]
             gt_instance_coords.append(d.gt_instance_labels.instance_coords) # [num_instances, 2]
             # If a keypoint is not annotated (hidden, out of the image, or marked as not visible), its weight (keypoint_weight) is set to 0.0 so that the loss ignores it.
             keypoint_weights.append(d.gt_instance_labels.keypoint_weights)
@@ -911,29 +931,81 @@ class CustomHead(BaseHead):
             if 'heatmap_mask' in d.gt_fields:
                 heatmap_mask.append(d.gt_fields.heatmap_mask)
 
+            if 'instance_bboxes' in d.gt_instance_labels:
+                gt_instance_bbox.append(d.gt_instance_labels.instance_bboxes) # [num_instances, 4] this means 4 => (xmin, ymin, xmax, ymax)
+
+
         # gt_heatmaps: per-keypoint heatmaps combining all image instances
         gt_heatmaps = torch.stack(gt_heatmaps)
         heatmap_mask = torch.stack(heatmap_mask) if heatmap_mask else None
         gt_instance_coords = torch.cat(gt_instance_coords, dim=0)
         # gt_instance_heatmaps: Separate per-keypoint heatmaps for each individual instance
         gt_instance_heatmaps = torch.cat(gt_instance_heatmaps, dim=0)
+        gt_instance_bbox = torch.cat(gt_instance_bbox, dim=0) if gt_instance_bbox else None
         keypoint_weights = torch.cat(keypoint_weights, dim=0)
         instance_imgids = torch.cat(instance_imgids).to(gt_heatmaps.device)
+        
 
         # feed-forward
         feats = feats[-1] # features from the backbone [3, 480, 128, 128]
         pred_instance_feats, pred_heatmaps = self.custom_iia_module.forward_train( # [num_instances, 480], [b, 20, 128, 128]
             feats, gt_instance_coords, instance_imgids)
+        
         # conpute contrastive loss
         contrastive_loss = 0
         for i in range(len(batch_data_samples)):
             # filters pred_instance_feats to keep only the features of the instances of that image.
             pred_instance_feat = pred_instance_feats[instance_imgids == i]
+            if gt_instance_bbox is not None and gt_instance_bbox.numel() > 0:
+                pred_instance_feat = pred_instance_feat[:, :-4]
             # Hack: For each instance we apply contrastive loss. That way we can separate very well the instances.
             contrastive_loss += self.loss_module['contrastive']( # InfoNCELoss
                 pred_instance_feat)
         # Average over the number of total instances
         contrastive_loss = contrastive_loss / max(1, len(instance_imgids)) # Avoid division by zero and avoid dependence on the number of instances.
+
+        # TODO: Here I need a losss for bbox
+
+        if self.use_bbox:
+            pred_bboxes = pred_heatmaps[:, -4:, :, :] # [b, 4, :, :] This means: 4 => (xmin, ymin, xmax, ymax)
+            pred_heatmaps = pred_heatmaps[:, :-4, :, :]
+
+            # Get heatmap dimensions from predictions
+            heatmaps_h, heatmaps_w = pred_heatmaps.shape[-2:]  # (H, W) => (128 x 128)
+            heatmaps_h -= 1 # [0: 127]
+            heatmaps_w -= 1 # [0: 127]
+            
+            # compute bbox loss
+            bbox_loss = 0
+            heatmaps_h, heatmaps_w = d.gt_fields.instance_heatmaps.shape[1:]  # Ej: (128, 128)
+            if gt_instance_bbox is not None:
+                for i in range(len(batch_data_samples)):
+                    # Get coordinates of instances in the sample heatmap
+                    gt_sample_coords =  gt_instance_coords[instance_imgids == i]
+                    sample_idx_col = torch.full((gt_sample_coords.size(0), 1), i, dtype=torch.long, device=gt_sample_coords.device)
+                    intances_indices = torch.cat((sample_idx_col, gt_sample_coords), dim=1)  # (samples in batch, 3) 3 is for img idx, x and y
+                    
+                    pred_intances_bboxes = FeatureExtractor.sample_feats(pred_bboxes, intances_indices) # instance feats from heatmap of CIIA instaead of backbone. [um_instances, 4] 
+                    # Get Groud Thruths
+                    gt_bboxes = gt_instance_bbox[instance_imgids == i]
+                    
+                    # Scale GT
+                    scale_vector = [heatmaps_w, heatmaps_h, heatmaps_w, heatmaps_h]
+                    if self.bbox_format == 'wh':
+                        scale_vector = [heatmaps_w, heatmaps_h]
+
+                    gt_bboxes_scaled = gt_bboxes / torch.tensor(
+                        scale_vector,
+                        device=pred_intances_bboxes.device
+                    )
+
+                    if len(gt_bboxes) > 0:                        
+                        bbox_loss += self.loss_module['bbox'](
+                            pred_intances_bboxes, gt_bboxes_scaled
+                        )
+
+                # Average over the number of total instances
+                bbox_loss = bbox_loss / max(1, len(instance_imgids))
 
         # TODO: Imopelemnt contrastive learning for borders maybe.
 
@@ -972,14 +1044,22 @@ class CustomHead(BaseHead):
 
         # pred instances & gt_instances: [num_instances, 19, 128, 128]
         if len(instance_imgids) > 0:
-            losses.update({ # FocalHeatmapLoss
+            # print("PRED", pred_instance_heatmaps)
+            # print("GT", gt_instance_heatmaps)
+
+            loss_data = { # FocalHeatmapLoss
                 'loss/heatmap_decoupled':
                 self.loss_module['heatmap_decoupled'](pred_instance_heatmaps,
                                                       gt_instance_heatmaps,
                                                       keypoint_weights),
                 'loss/contrastive':
                 contrastive_loss
-            })
+            }
+            
+            if self.use_bbox:
+                loss_data['loss/bbox'] = bbox_loss
+
+            losses.update(loss_data)
 
         return losses
     

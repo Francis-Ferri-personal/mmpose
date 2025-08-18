@@ -5,7 +5,7 @@ from typing import Optional, Tuple
 import numpy as np
 
 from mmpose.registry import KEYPOINT_CODECS
-from mmpose.structures.bbox import bbox_corner2xyxy
+from mmpose.structures.bbox import bbox_xyxy2xywh, bbox_corner2xyxy
 
 from .utils import (generate_gaussian_heatmaps, get_diagonal_lengths,
                     get_instance_bbox)
@@ -17,6 +17,7 @@ from .decoupled_heatmap import DecoupledHeatmap
 def get_instance_root(keypoints: np.ndarray,
                     keypoints_visible: Optional[np.ndarray] = None,
                     bboxes: np.ndarray = None,
+                    bbox_valid: np.ndarray = None,
                     root_type: str = 'bbox_center_real') -> np.ndarray:
         """Calculate the coordinates and visibility of instance roots.
 
@@ -58,9 +59,12 @@ def get_instance_root(keypoints: np.ndarray,
 
             # compute the instance root with visible keypoints
             if root_type == 'bbox_center_real':
-                # NOTE: bboxes come in corner format (four corner points for each box) 
-                bbox = bbox_corner2xyxy(bboxes[i]) # transform to xmin, ymin, xmax, ymax
-                roots_coordinate[i] = (bbox[0] + bbox[2]) / 2.0, (bbox[1] + bbox[3]) / 2.0
+                # Filter the invalid bboxes
+                if not bbox_valid[i]:
+                    roots_visible[i] = 0 # if bbox is invalid remove from visibility
+                    continue
+                # NOTE: bboxes in format xmin, ymin, xmax, ymax
+                roots_coordinate[i] = (bboxes[i][0] + bboxes[i][2]) / 2.0, (bboxes[i][1] + bboxes[i][3]) / 2.0 # (cx, cy)
                 roots_visible[i] = 1
             elif root_type == 'kpt_center':
                 roots_coordinate[i] = visible_keypoints.mean(axis=0)
@@ -100,6 +104,7 @@ class DecoupledHeatmapBbox(DecoupledHeatmap):
         root_type: str = 'bbox_center_real',
         heatmap_min_overlap: float = 0.7,
         encode_max_instances: int = 30,
+        bbox_format = 'x1y1x2y2', # 'ltwh', "wh"
         **kwargs
     ):
         # Call parent constructor
@@ -115,6 +120,7 @@ class DecoupledHeatmapBbox(DecoupledHeatmap):
         self.root_type = root_type
         self.scale_factor = (np.array(input_size) /
                              heatmap_size).astype(np.float32)
+        self.bbox_format = bbox_format
 
 
     label_mapping_table = dict(
@@ -148,7 +154,6 @@ class DecoupledHeatmapBbox(DecoupledHeatmap):
                 (N*K).
             - instance_coords (np.ndarray): The coordinates of instance roots
                 in shape (N, 2)
-            # TODO: HEre we have to return coordinates of valid bboxes 
         """
         if keypoints_visible is None:
             keypoints_visible = np.ones(keypoints.shape[:2], dtype=np.float32)
@@ -169,11 +174,17 @@ class DecoupledHeatmapBbox(DecoupledHeatmap):
         # NOTE: transformations like translation, scale and rotation introduce values out of range
         # Clip x and y coordinates independently to their respective heatmap dimensions
         bboxes = _bbox.copy()
-        bboxes[..., 0] = np.clip(bboxes[..., 0], 0, self.heatmap_size[0] - 1)
-        bboxes[..., 1] = np.clip(bboxes[..., 1], 0, self.heatmap_size[1] - 1)
-        
+        bboxes = bbox_corner2xyxy(bboxes)  # transform to (xmin, ymin, xmax, ymax) 
+
+        # Clip the values between [0:heatmap_size-1]
+        bboxes[..., [0, 2]] = np.clip(bboxes[..., [0, 2]], 0, self.heatmap_size[0] - 1)  # x
+        bboxes[..., [1, 3]] = np.clip(bboxes[..., [1, 3]], 0, self.heatmap_size[1] - 1)  # y
+
+        # Check validity: box is valid if width > 0 and height > 0
+        bbox_valid = (bboxes[..., 2] > bboxes[..., 0]) & (bboxes[..., 3] > bboxes[..., 1])
+
         # compute the root and scale of each instance
-        roots, roots_visible = get_instance_root(_keypoints, keypoints_visible, bboxes,
+        roots, roots_visible = get_instance_root(_keypoints, keypoints_visible, bboxes, bbox_valid,
                                                  self.root_type)
         
         sigmas = self._get_instance_wise_sigmas(_bbox)
@@ -193,8 +204,8 @@ class DecoupledHeatmapBbox(DecoupledHeatmap):
         # Calculates the diagonal length of the smallest rectangle covering all visible keypoints for each instance.
         diagonal_lengths = get_diagonal_lengths(_keypoints, keypoints_visible)
         for i in np.argsort(diagonal_lengths):
-            # if roots_visible[i] < 1:
-            #     continue
+            if roots_visible[i] < 1:
+                continue
             # rand root point in 3x3 grid
             # Randomly jitters the root point within a 3x3 grid around the original location, clamped to heatmap boundaries.
             x, y = roots[i] + np.random.randint(-1, 2, (2, ))
@@ -210,9 +221,16 @@ class DecoupledHeatmapBbox(DecoupledHeatmap):
             inst_roots = [inst_roots[i] for i in rand_indices]
             inst_indices = [inst_indices[i] for i in rand_indices]
             instance_bboxes = [instance_bboxes[i] for i in rand_indices]
-
+        
+        # Bbox default format: (xmin, ymin, xmax, ymax)
+        empty_instance_bbox = np.empty((0, 4), dtype=np.float32)
         # Transform instance bboxes format
-        instance_bboxes = list(map(lambda i_bbox: bbox_corner2xyxy(i_bbox), instance_bboxes)) # transform to (xmin, ymin, xmax, ymax)
+        if self.bbox_format == 'ltwh':
+            instance_bboxes = list(map(lambda i_bbox: bbox_xyxy2xywh(np.array(i_bbox).reshape(1, 4)), instance_bboxes))# =>(left, top, width, height) 
+            empty_instance_bbox = np.empty((0, 4), dtype=np.float32)
+        elif self.bbox_format == 'wh':
+            instance_bboxes = list(map(lambda i_bbox: bbox_xyxy2xywh(np.array(i_bbox).reshape(1, 4))[:, 2:], instance_bboxes))# => (left, top, width, height) => (width, height)
+            empty_instance_bbox = np.empty((0, 2), dtype=np.float32)
 
         # generate instance-wise heatmaps
         inst_heatmaps, inst_heatmap_weights = [], []
@@ -235,7 +253,7 @@ class DecoupledHeatmapBbox(DecoupledHeatmap):
             inst_heatmaps = np.empty((0, *self.heatmap_size[::-1]))
             inst_heatmap_weights = np.empty((0, ))
             inst_roots = np.empty((0, 2), dtype=np.int32)
-            instance_bboxes = np.empty((0, 4), dtype=np.float32)
+            instance_bboxes = empty_instance_bbox
 
         encoded = dict(
             heatmaps=heatmaps,
