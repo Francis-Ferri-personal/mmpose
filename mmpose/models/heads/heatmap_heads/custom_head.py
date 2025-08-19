@@ -167,8 +167,10 @@ class CustomIIAModule(BaseModule):
         out_channels: int,
         clamp_delta: float = 1e-4,
         init_cfg: OptConfigType = None,
+        use_bbox: bool = True
     ):
         super().__init__(init_cfg=init_cfg)
+        self.use_bbox = use_bbox
 
         conv_type = init_cfg[-1]["layer"][0]
 
@@ -275,9 +277,15 @@ Si sabes qué tipo de instancia es (humano, animal, tipo de postura...), puedes 
         heatmaps = self.forward(feats) # (b, c, 128, 128) i.e [6, 20 (num_keypoints + 1), 128, 128]
         indices = torch.cat((instance_imgids[:, None], instance_coords), dim=1)  # (samples in batch, 3) 3 is for img idx, x and y
         instance_feats = FeatureExtractor.sample_feats(feats, indices) # (samples in batch (instances), channel in features) i.e (instances, 480)
-        # print("iNSTANCE FEATS shape: ", instance_feats.shape) 
+       
+        if self.use_bbox:
+            bboxes_heatmaps = heatmaps[:, -4:, :, :] # [b, 4, :, :] This means: 4 => (xmin, ymin, xmax, ymax)
+            heatmaps = heatmaps[:, :-4, :, :]
+            instance_bboxes = FeatureExtractor.sample_feats(bboxes_heatmaps, indices) # [instances, 4]
 
-        return instance_feats, heatmaps
+            return instance_feats, heatmaps, instance_bboxes
+
+        return instance_feats, heatmaps, None
     
 
     def forward_test(
@@ -519,8 +527,10 @@ class CustomGFDModule(BaseModule):
         gfd_channels: int,
         clamp_delta: float = 1e-4,
         init_cfg: OptConfigType = None,
+        use_bbox: bool = True
     ):
         super().__init__(init_cfg=init_cfg)
+        self.use_bbox = use_bbox
     
         # TODO: Deformable Convolutions
         
@@ -531,7 +541,6 @@ class CustomGFDModule(BaseModule):
             conv_type=conv_type,
             in_channels=in_channels,
             out_channels=gfd_channels,
-            # kernel_size=1)
             kernel_size=3)
         
         
@@ -577,6 +586,7 @@ class CustomGFDModule(BaseModule):
         instance_feats: Tensor,
         instance_coords: Tensor,
         instance_imgids: Tensor,
+        intance_bboxes: Optional[Tensor] = None
     ) -> Tensor:
         """Extract decoupled heatmaps for each instance.
 
@@ -594,7 +604,9 @@ class CustomGFDModule(BaseModule):
         """
 
         # TODO: podiramos ahorrarnos el downsamplig si hacemos de mas canales la convolucion de IIA y usamos la segunda mitad
+        
         # feats  (b, 480, 128, 128)
+        # TODO: Maintain 1x1 convs for feature maps
         global_feats = self.conv_down(feats) #  (b, 32, 128, 128)
         # instance image ids: [num_instances]
 
@@ -603,8 +615,27 @@ class CustomGFDModule(BaseModule):
         # effectively creating a per-instance batch (duplicates features if multiple
         # instances come from the same image).
         global_feats = global_feats[instance_imgids] # [num_instances, 32, 128, 128]
+        # IMPORTANT: TODO: Think if it is better to use mask  before or after first convolution.
 
-         #instance_coords [num_instances, 2])
+        if self.use_bbox:
+            b, _, w, h = global_feats.shape
+            # b, _ = intance_bboxes.shape
+            intance_bboxes = (intance_bboxes * torch.tensor([w, h, w, h], device=intance_bboxes.device))
+            
+            intance_bboxes = torch.clamp(
+                intance_bboxes,
+                min=torch.tensor([0, 0, 0, 0], device=intance_bboxes.device),
+                max=torch.tensor([w, h, w, h], device=intance_bboxes.device)
+            ).long()
+
+            bbox_mask = torch.zeros((b, 1, w, h), device=feats.device) 
+            for i in range(b):
+                x1, y1, x2, y2 = intance_bboxes[i] # xmin, ymin, xmax, ymax
+                bbox_mask[i, 0, y1:y2 + 1, x1:x2 + 1] = 1
+
+            # TODO: we are using only a binary mask. Use a gaussian
+            global_feats = global_feats * bbox_mask
+
 
         cond_instance_feats = torch.cat(
             (self.channel_attention(global_feats, instance_feats), # i.e ([num_instances, 32, 128, 128], [instances, 480])
@@ -644,7 +675,6 @@ class CustomHead(BaseHead):
 
                  # My customizations
                  conv_type: str = 'Conv2d',
-                 bbox_format: str = 'x1y1x2y2',
 
                  decoder: OptConfigType = None,
                  init_cfg: OptConfigType = None):
@@ -695,7 +725,8 @@ class CustomHead(BaseHead):
                         type='Normal',
                         std=0.001,
                         bias=bias_value))
-            ])
+            ],
+            use_bbox=self.use_bbox)
         self.custom_gfd_module = CustomGFDModule(
             in_channels,
             num_keypoints,
@@ -710,7 +741,8 @@ class CustomHead(BaseHead):
                         type='Normal',
                         std=0.001,
                         bias=bias_value))
-            ])
+            ],
+            use_bbox=self.use_bbox)
 
         # TODO check different lose functions
         # build losses
@@ -911,7 +943,7 @@ class CustomHead(BaseHead):
         gt_heatmaps, gt_instance_coords, keypoint_weights = [], [], []
         heatmap_mask = []
 
-        instance_imgids, gt_instance_heatmaps, gt_instance_bbox  = [], [], []
+        instance_imgids, gt_instance_heatmaps, gt_instance_bboxes  = [], [], []
         for i, d in enumerate(batch_data_samples):
             gt_heatmaps.append(d.gt_fields.heatmaps) # [20 (num_keypoints + root), 128, 128]
             gt_instance_coords.append(d.gt_instance_labels.instance_coords) # [num_instances, 2]
@@ -932,7 +964,7 @@ class CustomHead(BaseHead):
                 heatmap_mask.append(d.gt_fields.heatmap_mask)
 
             if 'instance_bboxes' in d.gt_instance_labels:
-                gt_instance_bbox.append(d.gt_instance_labels.instance_bboxes) # [num_instances, 4] this means 4 => (xmin, ymin, xmax, ymax)
+                gt_instance_bboxes.append(d.gt_instance_labels.instance_bboxes) # [num_instances, 4] this means 4 => (xmin, ymin, xmax, ymax)
 
 
         # gt_heatmaps: per-keypoint heatmaps combining all image instances
@@ -941,14 +973,14 @@ class CustomHead(BaseHead):
         gt_instance_coords = torch.cat(gt_instance_coords, dim=0)
         # gt_instance_heatmaps: Separate per-keypoint heatmaps for each individual instance
         gt_instance_heatmaps = torch.cat(gt_instance_heatmaps, dim=0)
-        gt_instance_bbox = torch.cat(gt_instance_bbox, dim=0) if gt_instance_bbox else None
+        gt_instance_bboxes = torch.cat(gt_instance_bboxes, dim=0) if gt_instance_bboxes else None
         keypoint_weights = torch.cat(keypoint_weights, dim=0)
         instance_imgids = torch.cat(instance_imgids).to(gt_heatmaps.device)
         
 
         # feed-forward
         feats = feats[-1] # features from the backbone [3, 480, 128, 128]
-        pred_instance_feats, pred_heatmaps = self.custom_iia_module.forward_train( # [num_instances, 480], [b, 20, 128, 128]
+        pred_instance_feats, pred_heatmaps, pred_instance_bboxes = self.custom_iia_module.forward_train( # [num_instances, 480], [b, 20, 128, 128]
             feats, gt_instance_coords, instance_imgids)
         
         # conpute contrastive loss
@@ -956,8 +988,6 @@ class CustomHead(BaseHead):
         for i in range(len(batch_data_samples)):
             # filters pred_instance_feats to keep only the features of the instances of that image.
             pred_instance_feat = pred_instance_feats[instance_imgids == i]
-            if gt_instance_bbox is not None and gt_instance_bbox.numel() > 0:
-                pred_instance_feat = pred_instance_feat[:, :-4]
             # Hack: For each instance we apply contrastive loss. That way we can separate very well the instances.
             contrastive_loss += self.loss_module['contrastive']( # InfoNCELoss
                 pred_instance_feat)
@@ -967,28 +997,25 @@ class CustomHead(BaseHead):
         # TODO: Here I need a losss for bbox
 
         if self.use_bbox:
-            pred_bboxes = pred_heatmaps[:, -4:, :, :] # [b, 4, :, :] This means: 4 => (xmin, ymin, xmax, ymax)
-            pred_heatmaps = pred_heatmaps[:, :-4, :, :]
+            # pred_bboxes [b, 4, :, :] This means: 4 => (xmin, ymin, xmax, ymax)
 
             # Get heatmap dimensions from predictions
+            #  heatmaps_h, heatmaps_w = d.gt_fields.instance_heatmaps.shape[1:]  # Ej: (128, 128)
             heatmaps_h, heatmaps_w = pred_heatmaps.shape[-2:]  # (H, W) => (128 x 128)
             heatmaps_h -= 1 # [0: 127]
             heatmaps_w -= 1 # [0: 127]
             
+            
             # compute bbox loss
             bbox_loss = 0
-            heatmaps_h, heatmaps_w = d.gt_fields.instance_heatmaps.shape[1:]  # Ej: (128, 128)
-            if gt_instance_bbox is not None:
-                for i in range(len(batch_data_samples)):
-                    # Get coordinates of instances in the sample heatmap
-                    gt_sample_coords =  gt_instance_coords[instance_imgids == i]
-                    sample_idx_col = torch.full((gt_sample_coords.size(0), 1), i, dtype=torch.long, device=gt_sample_coords.device)
-                    intances_indices = torch.cat((sample_idx_col, gt_sample_coords), dim=1)  # (samples in batch, 3) 3 is for img idx, x and y
-                    
-                    pred_intances_bboxes = FeatureExtractor.sample_feats(pred_bboxes, intances_indices) # instance feats from heatmap of CIIA instaead of backbone. [um_instances, 4] 
-                    # Get Groud Thruths
-                    gt_bboxes = gt_instance_bbox[instance_imgids == i]
-                    
+            for i in range(len(batch_data_samples)):
+                # Get Groud Thruths
+                gt_bboxes = gt_instance_bboxes[instance_imgids == i]
+                # filters pred_instance_bboxes to keep only the features of the instances of that image.
+                pred_sample_bboxes = pred_instance_bboxes[instance_imgids == i] # [num_instances, 4]
+
+                # if gt_instance_bboxes is not None:
+                if len(gt_bboxes) > 0:
                     # Scale GT
                     scale_vector = [heatmaps_w, heatmaps_h, heatmaps_w, heatmaps_h]
                     if self.bbox_format == 'wh':
@@ -996,17 +1023,17 @@ class CustomHead(BaseHead):
 
                     gt_bboxes_scaled = gt_bboxes / torch.tensor(
                         scale_vector,
-                        device=pred_intances_bboxes.device
+                        device=pred_sample_bboxes.device
                     )
-
-                    if len(gt_bboxes) > 0:                        
-                        bbox_loss += self.loss_module['bbox'](
-                            pred_intances_bboxes, gt_bboxes_scaled
-                        )
+                                            
+                    bbox_loss += self.loss_module['bbox'](
+                        pred_sample_bboxes, gt_bboxes_scaled
+                    )
 
                 # Average over the number of total instances
                 bbox_loss = bbox_loss / max(1, len(instance_imgids))
 
+                    
         # TODO: Imopelemnt contrastive learning for borders maybe.
 
         # limit the number of instances
@@ -1028,9 +1055,12 @@ class CustomHead(BaseHead):
 
         # calculate the decoupled heatmaps for each instance
         # feats = [b, 480, 128, 128]), pred_instance_feats = [instances , 480] instances = num pig in batch (in all the images)
+        intance_bboxes = None
+        if self.use_bbox:
+            intance_bboxes = pred_instance_bboxes
         pred_instance_heatmaps = self.custom_gfd_module(feats, pred_instance_feats,
                                                  gt_instance_coords,
-                                                 instance_imgids)
+                                                 instance_imgids, intance_bboxes=intance_bboxes)
         
 
         # calculate losses
