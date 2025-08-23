@@ -4,6 +4,7 @@ from typing import Dict, Optional, Sequence, Tuple, Union
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from mmcv.cnn import build_conv_layer, DepthwiseSeparableConvModule
 from mmengine.model import BaseModule, ModuleDict
 from mmengine.structures import InstanceData, PixelData
@@ -278,14 +279,13 @@ Si sabes qué tipo de instancia es (humano, animal, tipo de postura...), puedes 
         indices = torch.cat((instance_imgids[:, None], instance_coords), dim=1)  # (samples in batch, 3) 3 is for img idx, x and y
         instance_feats = FeatureExtractor.sample_feats(feats, indices) # (samples in batch (instances), channel in features) i.e (instances, 480)
        
+        instance_bboxes = None
         if self.use_bbox:
             bboxes_heatmaps = heatmaps[:, -4:, :, :] # [b, 4, :, :] This means: 4 => (xmin, ymin, xmax, ymax)
             heatmaps = heatmaps[:, :-4, :, :]
             instance_bboxes = FeatureExtractor.sample_feats(bboxes_heatmaps, indices) # [instances, 4]
 
-            return instance_feats, heatmaps, instance_bboxes
-
-        return instance_feats, heatmaps, None
+        return instance_feats, heatmaps, instance_bboxes
     
 
     def forward_test(
@@ -321,8 +321,15 @@ Si sabes qué tipo de instancia es (humano, animal, tipo de postura...), puedes 
         # That last channel is used to decide where there are instances in the image.
         # NOTE: It seems one feature map per sample in batch. but if that is the case, we are wasting resources in the convolutions.
         # TODO: The output channel of the convolution should be one check it because they are using only one channel for instance it seems.
-        heatmaps = self.forward(feats).narrow(1, -1, 1) # KEY: extracts only the last channel, which is the coupled heatmap of the "root" (instance).
+        heatmaps = self.forward(feats)
+        
+        if self.use_bbox:
+            bboxes_heatmaps = heatmaps[:, -4:, :, :] # [b, 4, :, :] This means: 4 => (xmin, ymin, xmax, ymax)
+            heatmaps = heatmaps[:, :-4, :, :]
+        
+        heatmaps = heatmaps.narrow(1, -1, 1) # KEY: extracts only the last channel, which is the coupled heatmap of the "root" (instance).
         # TODO: print(heatmaps.shape) # it should be (B, 1, H, W)
+        
         
         # If flip_test is enabled, average the original and flipped heatmaps for robustness
         if test_cfg.get('flip_test', False):
@@ -351,8 +358,12 @@ Si sabes qué tipo de instancia es (humano, animal, tipo de postura...), puedes 
         # TODO: We should try the gaussian thing that I propose to have a region around the center of the instance.
         # TODO: Adaptive convolution could also be useful. Although I think the whole attention part is done later in the other module.
         instance_feats = FeatureExtractor.sample_feats(feats, instance_coords)
+        
+        instance_bboxes =  None
+        if self.use_bbox:
+            instance_bboxes = FeatureExtractor.sample_feats(bboxes_heatmaps, instance_coords) # [instances, 4]
 
-        return instance_feats, instance_coords, scores
+        return instance_feats, instance_coords, scores, instance_bboxes
 
 
 class ChannelAttention(nn.Module):
@@ -381,6 +392,9 @@ class ChannelAttention(nn.Module):
         instance_feats = self.atn(instance_feats).unsqueeze(2).unsqueeze(3)
         # print ("Instance features: ", instance_feats.shape) # [instances, 32, 1, 1])
         return global_feats * instance_feats #We assing importance to each channel
+    
+    # TODO: TODO: WHy we did not add normal channel attention I mean  chnnel attention to the feature map and channel attention to the instance features 
+    # TODO: Craete something like instance aware CBAM 
          
     
 
@@ -503,6 +517,197 @@ class SpatialAttention(nn.Module):
     
 
 
+def gaussian_heatmap(bboxes, heatmap_size, sigma=3):
+    """
+    Generate a Gaussian heatmap centered at each bounding box.
+    
+    Args:
+        bboxes (Tensor): shape (N, 4) in format (xmin, ymin, xmax, ymax)
+        heatmap_size (tuple): (H, W) size of the heatmap
+        sigma (float): standard deviation of the Gaussian
+
+    Returns:
+        Tensor: heatmaps of shape (N, H, W)
+    """
+    H, W = heatmap_size
+    device = bboxes.device
+    
+    # create coordinate grid
+    yv, xv = torch.meshgrid(
+        torch.arange(H, device=device), 
+        torch.arange(W, device=device), indexing="ij"
+    )
+    
+    heatmaps = []
+    for bbox in bboxes:
+        xmin, ymin, xmax, ymax = bbox
+        # center of the bounding box
+        cx = (xmin + xmax) / 2.0
+        cy = (ymin + ymax) / 2.0
+        
+        # Gaussian centered at (cx, cy)
+        g = torch.exp(-((xv - cx) ** 2 + (yv - cy) ** 2) / (2 * sigma ** 2))
+        g = g / g.max()  # normalize to [0,1]
+        heatmaps.append(g)
+    
+    return torch.stack(heatmaps, dim=0)  # (N, H, W)
+
+
+def gaussian_mask(h, w, cx, cy, sigma, device):
+    """Generate a 2D Gaussian mask centered at (cx, cy)."""
+    yy, xx = torch.meshgrid(
+        torch.arange(h, device=device),
+        torch.arange(w, device=device),
+        indexing="ij"
+    )
+    g = torch.exp(-((xx - cx) ** 2 + (yy - cy) ** 2) / (2 * sigma ** 2))
+    return g / g.max()  # normalize to [0,1]
+
+
+# Coordinate attention
+class h_sigmoid(nn.Module):
+    """Hard Sigmoid: fast approximation of sigmoid.
+    Formula: ReLU6(x + 3) / 6, range [0,1]."""
+    def __init__(self, inplace=True):
+        super().__init__()
+        self.relu = nn.ReLU6(inplace=inplace)
+
+    def forward(self, x):
+        return self.relu(x + 3) / 6
+
+
+class h_swish(nn.Module):
+    """Hard Swish: efficient Swish approximation.
+    Formula: x * h_sigmoid(x)."""
+    def __init__(self, inplace=True):
+        super().__init__()
+        self.sigmoid = h_sigmoid(inplace=inplace)
+
+    def forward(self, x):
+        return x * self.sigmoid(x)
+
+class CoordAtt(nn.Module):
+    """Coordinate Attention: embeds spatial (H,W) info into channel attention.
+    """
+    # TODO: Put a fix value instead of reduction
+    def __init__(self, inp, oup, use_reduction=False, reduction=32, mip_channels=32):
+        super(CoordAtt, self).__init__()
+        # NOTE: I replace this with normal implementation because it hasa non deterministic implementation
+        # self.pool_h = nn.AdaptiveAvgPool2d((None, 1)) # None keeps the dimension size equal to the input width
+        # self.pool_w = nn.AdaptiveAvgPool2d((1, None)) # None keeps the dimension size equal to the input height
+
+        # Channel reduction
+        mip = mip_channels
+        if use_reduction:
+            mip = max(8, inp // reduction) # max 8 ensures that it never goes below 8 channels, preventing the module from becoming too small
+        self.conv1 = nn.Conv2d(inp, mip, kernel_size=1, stride=1, padding=0)
+        self.bn1 = nn.BatchNorm2d(mip)
+        self.act = h_swish()
+        
+        self.conv_h = nn.Conv2d(mip, oup, kernel_size=1, stride=1, padding=0)
+        self.conv_w = nn.Conv2d(mip, oup, kernel_size=1, stride=1, padding=0)
+        
+
+    def forward(self, x):
+        identity = x # (b, c, 128, 128)
+        n,c,h,w = x.size()
+
+        # x_h = self.pool_h(x) # (b, c, 128, 1)
+        # x_w = self.pool_w(x).permute(0, 1, 3, 2) # (B, C, 1, W) → (B, C, W, 1) i.e (b, c, 1, 128) → (b, c, 128, 1)   
+        # NOTE: The above implementation is not deterministic, so I replace it with the following
+        x_h = F.avg_pool2d(x, kernel_size=(1, w))  # (b, c, h, 1)
+        x_w = F.avg_pool2d(x, kernel_size=(h, 1))  # (b, c, 1, w)
+        x_w = x_w.permute(0, 1, 3, 2)              # (b, c, w, 1)
+
+        y = torch.cat([x_h, x_w], dim=2) # (b, c, 256 (128 +  128), 1)
+        y = self.conv1(y) # (b, mip, 256, 1)
+        y = self.bn1(y) 
+        y = self.act(y)
+
+        x_h, x_w = torch.split(y, [h, w], dim=2) # (b, mip, 128, 1), (b, mip, 128, 1)
+        x_w = x_w.permute(0, 1, 3, 2) # (b, mip, 1, 128)
+
+        # Attention weights
+        a_h = self.conv_h(x_h).sigmoid()
+        a_w = self.conv_w(x_w).sigmoid()
+
+        out = identity * a_w * a_h
+
+        return out
+
+
+class InstanceConcatenatedCoordAtt(nn.Module):
+    """Coordinate Attention: embeds spatial (H,W) info into channel attention.
+    """
+    # TODO: Put a fix value instead of reduction
+    def __init__(self, inp, oup, inst_emb_dim=480, use_reduction=False, reduction=32, mip_channels=32):
+        super(InstanceConcatenatedCoordAtt, self).__init__()
+        self.inp = inp
+        self.oup = oup
+        self.inst_emb_dim = inst_emb_dim
+        # NOTE: I replace this with normal implementation because it hasa non deterministic implementation
+        # self.pool_h = nn.AdaptiveAvgPool2d((None, 1)) # None keeps the dimension size equal to the input width
+        # self.pool_w = nn.AdaptiveAvgPool2d((1, None)) # None keeps the dimension size equal to the input height
+
+        # Channel reduction
+        mip = mip_channels
+        if use_reduction:
+            mip = max(8, inp // reduction) # max 8 ensures that it never goes below 8 channels, preventing the module from becoming too small
+
+        # Embedding instancia -> d
+        self.inst_mlp = nn.Sequential(
+            nn.Linear(inst_emb_dim, mip),
+            nn.ReLU(inplace=True)
+        )
+        
+        self.conv1 = nn.Conv2d(inp + mip, mip, kernel_size=1, stride=1, padding=0)
+        self.bn1 = nn.BatchNorm2d(mip)
+        self.act = h_swish()
+        
+        self.conv_h = nn.Conv2d(mip, oup, kernel_size=1, stride=1, padding=0)
+        self.conv_w = nn.Conv2d(mip, oup, kernel_size=1, stride=1, padding=0)
+        
+
+    def forward(self, x, inst_feats):
+        identity = x # (b, c, 128, 128)
+        n,c,h,w = x.size()
+
+        # x_h = self.pool_h(x) # (b, c, 128, 1)
+        # x_w = self.pool_w(x).permute(0, 1, 3, 2) # (B, C, 1, W) → (B, C, W, 1) i.e (b, c, 1, 128) → (b, c, 128, 1)   
+        # NOTE: The above implementation is not deterministic, so I replace it with the following
+        x_h = F.avg_pool2d(x, kernel_size=(1, w))  # (b, c, h, 1)
+        x_w = F.avg_pool2d(x, kernel_size=(h, 1))  # (b, c, 1, w)
+        x_w = x_w.permute(0, 1, 3, 2)              # (b, c, w, 1)
+
+        # embedding instance expanded
+        inst_emb = self.inst_mlp(inst_feats) # [b, d]
+        inst_emb = inst_emb.unsqueeze(-1).unsqueeze(-1) # [b, d, 1, 1]
+        inst_emb_h = inst_emb.expand(-1, -1, h, 1) # [b, d, H, 1]
+        inst_emb_w = inst_emb.expand(-1, -1, w, 1) # [b, d, W, 1]
+
+
+        # concat with features pooled
+        x_h_cat = torch.cat([x_h, inst_emb_h], dim=1)  # [b, c+d, h, 1]
+        x_w_cat = torch.cat([x_w, inst_emb_w], dim=1)  # [b, c+d, w, 1]
+
+        y = torch.cat([x_h_cat, x_w_cat], dim=2) # (b, c+d, 256 (128 +  128), 1)
+        y = self.conv1(y) # (b, mip, 256, 1)
+        y = self.bn1(y) 
+        y = self.act(y)
+
+        x_h, x_w = torch.split(y, [h, w], dim=2) # (b, mip, 128, 1), (b, mip, 128, 1)
+        x_w = x_w.permute(0, 1, 3, 2) # (b, mip, 1, 128)
+
+        # Attention weights
+        a_h = self.conv_h(x_h).sigmoid()
+        a_w = self.conv_w(x_w).sigmoid()
+
+        out = identity * a_w * a_h
+
+        return out
+    
+
+
 class CustomGFDModule(BaseModule):
     """Modification of CIDHead's GFD module
 
@@ -527,10 +732,12 @@ class CustomGFDModule(BaseModule):
         gfd_channels: int,
         clamp_delta: float = 1e-4,
         init_cfg: OptConfigType = None,
-        use_bbox: bool = True
+        use_bbox: bool = True,
+        coord_att_type: bool = False
     ):
         super().__init__(init_cfg=init_cfg)
         self.use_bbox = use_bbox
+        self.coord_att_type = coord_att_type
     
         # TODO: Deformable Convolutions
         
@@ -554,16 +761,30 @@ class CustomGFDModule(BaseModule):
         # TODO: try Criss-Cross Attention (CCA)
         # TODO: Try CBAM
 
-        self.channel_attention = ChannelAttention(in_channels, gfd_channels)
-        # TODO: we could change the spatial attention with something more advanced.
-        self.spatial_attention = SpatialAttention(in_channels, gfd_channels, conv_type)
-        
-        self.fuse_attention = get_conv_operation(
-            conv_type=conv_type,
-            in_channels=gfd_channels * 2,
-            out_channels=gfd_channels,
-            # kernel_size=1)
-            kernel_size=3)
+        if self.use_bbox:
+            gfd_channels = gfd_channels + 1
+
+        if self.coord_att_type == "Default":
+            # Coordinate attention without instance information
+            self.coord_attention = CoordAtt(gfd_channels, gfd_channels, mip_channels=32)
+        elif self.coord_att_type == "Concatenated":
+            # Coordinate attention with instance information concatenated and repeated per pixel.
+            # It applies 1x1 conv in the polled h and polled w axi
+            self.coord_attention = InstanceConcatenatedCoordAtt(
+                inp=gfd_channels,
+                oup=gfd_channels,
+                mip_channels=32)
+        else:
+            self.channel_attention = ChannelAttention(in_channels, gfd_channels)
+            # TODO: we could change the spatial attention with something more advanced.
+            self.spatial_attention = SpatialAttention(in_channels, gfd_channels, conv_type)
+            
+            self.fuse_attention = get_conv_operation(
+                conv_type=conv_type,
+                in_channels=gfd_channels * 2,
+                out_channels=gfd_channels,
+                # kernel_size=1)
+                kernel_size=3)
         
         """
         heatmap_conv:
@@ -616,11 +837,14 @@ class CustomGFDModule(BaseModule):
         # instances come from the same image).
         global_feats = global_feats[instance_imgids] # [num_instances, 32, 128, 128]
         # IMPORTANT: TODO: Think if it is better to use mask  before or after first convolution.
-
         if self.use_bbox:
             b, _, w, h = global_feats.shape
             # b, _ = intance_bboxes.shape
+            # TODO TODO: FIND ERROR HERE
             intance_bboxes = (intance_bboxes * torch.tensor([w, h, w, h], device=intance_bboxes.device))
+            # print(w, h)
+            # print(intance_bboxes.shape)
+            # print("intance_bboxes", intance_bboxes[:3])
             
             intance_bboxes = torch.clamp(
                 intance_bboxes,
@@ -631,20 +855,54 @@ class CustomGFDModule(BaseModule):
             bbox_mask = torch.zeros((b, 1, w, h), device=feats.device) 
             for i in range(b):
                 x1, y1, x2, y2 = intance_bboxes[i] # xmin, ymin, xmax, ymax
+                # print("HERERERERE:", x1, y1, x2, y2)
+                
+                # Binary mask
                 bbox_mask[i, 0, y1:y2 + 1, x1:x2 + 1] = 1
 
+                # # Gaussian mask
+                # cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0 # center
+                # bw, bh = max(x2 - x1, 1), max(y2 - y1, 1) # sze
+                # sigma = 0.1 * min(bw, bh)  # tunable
+                # bbox_mask[i, 0] = gaussian_mask(h, w, cx, cy, sigma, feats.device)
+                # # Debug info
+                # mask = bbox_mask[i, 0] 
+                # print(f"[DEBUG] Gaussian mask {i}: min={mask.min().item():.4f}, max={mask.max().item():.4f}")
+                # print(f"Sum={mask.sum().item():.4f}, Nonzero={(mask > 0).sum().item()}")
+
+                # # Scale to [0, 9] for console printing
+                # scaled = (mask - mask.min()) / (mask.max() - mask.min() + 1e-6) * 9
+                # scaled = scaled.int()
+
+                # # Optional: downsample to 16x16 for readability
+                # preview = torch.nn.functional.interpolate(
+                #     scaled.unsqueeze(0).unsqueeze(0).float(), size=(16, 16), mode="nearest"
+                # ).squeeze()
+
+                # print(preview)
+
+
+
+
             # TODO: we are using only a binary mask. Use a gaussian
-            global_feats = global_feats * bbox_mask
+            # Concat bbox mask at the end of global_feats
+            global_feats = torch.cat((global_feats, bbox_mask), dim=1)
 
-
-        cond_instance_feats = torch.cat(
-            (self.channel_attention(global_feats, instance_feats), # i.e ([num_instances, 32, 128, 128], [instances, 480])
-             self.spatial_attention(global_feats, instance_feats,
-                                    instance_coords)),
-            dim=1)
+        if self.coord_att_type == "Default":
+            cond_instance_feats = self.coord_attention(global_feats)
+            # NOTE: I am not sing relu because it can remove negative values that are valuable information from the feature map.
+        elif self.coord_att_type == "Concatenated":
+            cond_instance_feats = self.coord_attention(global_feats, instance_feats)
+        else:
+            cond_instance_feats = torch.cat(
+                (self.channel_attention(global_feats, instance_feats), # i.e ([num_instances, 32, 128, 128], [instances, 480])
+                self.spatial_attention(global_feats, instance_feats,
+                                        instance_coords)),
+                dim=1)
         
-        cond_instance_feats = self.fuse_attention(cond_instance_feats) # [num_instances, 32, 128, 128])
-        cond_instance_feats = torch.nn.functional.relu(cond_instance_feats)
+            cond_instance_feats = self.fuse_attention(cond_instance_feats) # [num_instances, 32, 128, 128])
+            cond_instance_feats = torch.nn.functional.relu(cond_instance_feats)
+            
         cond_instance_feats = self.heatmap_conv(cond_instance_feats) # num_channels: 32 -> 19 (this is num_keypoints)    i.e. [num_instances, 19, 128, 128]
         heatmaps = self.sigmoid(cond_instance_feats)
 
@@ -664,7 +922,8 @@ class CustomHead(BaseHead):
                  gfd_channels: int,
                  num_keypoints: int,
                  prior_prob: float = 0.01,
-                 use_bbox: bool =  True,
+                 use_bbox: bool =  False,
+                 coord_att_type: bool = False,
                  # TODO: Check loses
                  coupled_heatmap_loss: OptConfigType = dict(
                      type='FocalHeatmapLoss'),
@@ -687,6 +946,7 @@ class CustomHead(BaseHead):
         self.num_keypoints = num_keypoints
 
         self.use_bbox = use_bbox
+        self.coord_att_type = coord_att_type
 
         if decoder is not None:
             self.decoder = KEYPOINT_CODECS.build(decoder)
@@ -742,7 +1002,8 @@ class CustomHead(BaseHead):
                         std=0.001,
                         bias=bias_value))
             ],
-            use_bbox=self.use_bbox)
+            use_bbox=self.use_bbox,
+            coord_att_type=self.coord_att_type)
 
         # TODO check different lose functions
         # build losses
@@ -840,7 +1101,7 @@ class CustomHead(BaseHead):
 
         instance_info = self.custom_iia_module.forward_test(feats, test_cfg)
 
-        instance_feats, instance_coords, instance_scores = instance_info # [pred_instances (x2 if flipped=true), 480], [pred_instances, 2] [pred_instances]
+        instance_feats, instance_coords, instance_scores, instance_bboxes = instance_info # [pred_instances (x2 if flipped=true), 480], [pred_instances, 2] [pred_instances], [pred_instances, 4]
 
         if len(instance_coords) > 0:
             # It is a tensor of size [N], where each value indicates which image in the batch each instance belongs to.
@@ -856,7 +1117,8 @@ class CustomHead(BaseHead):
             # Call the custom_gfd_module module to generate decoupled heatmaps for each instance using global features, instance features, coordinates, and IDs.
             instance_heatmaps = self.custom_gfd_module(feats, instance_feats,
                                                 instance_coords,
-                                                instance_imgids)
+                                                instance_imgids,
+                                                intance_bboxes=instance_bboxes)
             # instance_heatmaps = [pred_instances (pred_instances x 2 if flip= true), 19, 128, 240])
             
             if test_cfg.get('flip_test', False):
@@ -938,7 +1200,7 @@ class CustomHead(BaseHead):
         Returns:
             dict: A dictionary of losses.
         """
-        # print("FEATS:", feats[0].shape)
+        # feats: [b, 480, 128, 128]
         # load targets
         gt_heatmaps, gt_instance_coords, keypoint_weights = [], [], []
         heatmap_mask = []
@@ -980,10 +1242,11 @@ class CustomHead(BaseHead):
 
         # feed-forward
         feats = feats[-1] # features from the backbone [3, 480, 128, 128]
-        pred_instance_feats, pred_heatmaps, pred_instance_bboxes = self.custom_iia_module.forward_train( # [num_instances, 480], [b, 20, 128, 128]
+        pred_instance_feats, pred_heatmaps, pred_instance_bboxes = self.custom_iia_module.forward_train( # [num_instances, 480], [b, 20, 128, 128], [b, 4]
             feats, gt_instance_coords, instance_imgids)
         
         # conpute contrastive loss
+        # TODO: CREO QUE SE ESTA PERDIENDO PODER DISCRIMINATIVO AQUI a pesar de que 
         contrastive_loss = 0
         for i in range(len(batch_data_samples)):
             # filters pred_instance_feats to keep only the features of the instances of that image.
@@ -1025,13 +1288,13 @@ class CustomHead(BaseHead):
                         scale_vector,
                         device=pred_sample_bboxes.device
                     )
-                                            
+
                     bbox_loss += self.loss_module['bbox'](
                         pred_sample_bboxes, gt_bboxes_scaled
                     )
 
-                # Average over the number of total instances
-                bbox_loss = bbox_loss / max(1, len(instance_imgids))
+            # Average over the number of total instances
+            bbox_loss = bbox_loss / max(1, len(instance_imgids))
 
                     
         # TODO: Imopelemnt contrastive learning for borders maybe.
