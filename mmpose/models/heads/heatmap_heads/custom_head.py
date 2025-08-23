@@ -906,6 +906,7 @@ class CustomGFDModule(BaseModule):
         elif self.coord_att_type == "Concatenated":
             cond_instance_feats = self.coord_attention(global_feats, instance_feats)
         elif self.coord_att_type == "PreFiLM":
+            # Apply FiLM-like scaling to global features based on instance features before coordinate attention
             scale = self.mlp(instance_feats) # (b, 32)
             scale = scale.unsqueeze(-1).unsqueeze(-1) # (b, 32, 1, 1)
             global_feats = global_feats * scale # modulated_feats  (b, 32, h, w)
