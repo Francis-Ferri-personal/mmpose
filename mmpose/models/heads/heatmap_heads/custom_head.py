@@ -774,6 +774,18 @@ class CustomGFDModule(BaseModule):
                 inp=gfd_channels,
                 oup=gfd_channels,
                 mip_channels=32)
+            
+        # NOTE: These ones is not going to conditionate the coordinate attention which is bad. (Try to avoid POST and Dual)
+        # TODO: We can try post coord attention film 
+        # TODO: Dual-path (parallel): apply coordinate attention in one banch and apply film in annoter. COncatenate and 1x1 conv
+        elif self.coord_att_type == "PreFiLM":
+            self.mlp = nn.Sequential(
+                nn.Linear(480, 128),
+                nn.ReLU(inplace=True),
+                nn.Linear(128, gfd_channels),
+                nn.Sigmoid()  # escala entre 0-1
+            )
+            self.coord_attention = CoordAtt(gfd_channels, gfd_channels, mip_channels=32)
         else:
             self.channel_attention = ChannelAttention(in_channels, gfd_channels)
             # TODO: we could change the spatial attention with something more advanced.
@@ -893,6 +905,11 @@ class CustomGFDModule(BaseModule):
             # NOTE: I am not sing relu because it can remove negative values that are valuable information from the feature map.
         elif self.coord_att_type == "Concatenated":
             cond_instance_feats = self.coord_attention(global_feats, instance_feats)
+        elif self.coord_att_type == "PreFiLM":
+            scale = self.mlp(instance_feats) # (b, 32)
+            scale = scale.unsqueeze(-1).unsqueeze(-1) # (b, 32, 1, 1)
+            global_feats = global_feats * scale # modulated_feats  (b, 32, h, w)
+            cond_instance_feats = self.coord_attention(global_feats)
         else:
             cond_instance_feats = torch.cat(
                 (self.channel_attention(global_feats, instance_feats), # i.e ([num_instances, 32, 128, 128], [instances, 480])
