@@ -786,6 +786,15 @@ class CustomGFDModule(BaseModule):
                 nn.Sigmoid()  # escala entre 0-1
             )
             self.coord_attention = CoordAtt(gfd_channels, gfd_channels, mip_channels=32)
+        elif self.coord_att_type == "PreFiLM-Gated":
+            self.mlp = nn.Sequential(
+                nn.Linear(480, 128),
+                nn.ReLU(inplace=True),
+                nn.Linear(128, gfd_channels),
+                nn.Sigmoid()  # escala entre 0-1
+            )
+            self.sigmoid_gating = TruncSigmoid(min=clamp_delta, max=1 - clamp_delta)
+            self.coord_attention = CoordAtt(gfd_channels, gfd_channels, mip_channels=32)
         else:
             self.channel_attention = ChannelAttention(in_channels, gfd_channels)
             # TODO: we could change the spatial attention with something more advanced.
@@ -910,6 +919,15 @@ class CustomGFDModule(BaseModule):
             scale = self.mlp(instance_feats) # (b, 32)
             scale = scale.unsqueeze(-1).unsqueeze(-1) # (b, 32, 1, 1)
             global_feats = global_feats * scale # modulated_feats  (b, 32, h, w)
+            
+            cond_instance_feats = self.coord_attention(global_feats)
+        elif self.coord_att_type == "PreFiLM-Gated":
+            # Apply FiLM-like scaling to global features based on instance features before coordinate attention
+            inst_mod  = self.mlp(instance_feats) # (b, 32)
+            inst_gate = self.sigmoid_gating(inst_mod) # (b, 32)
+            inst_gate = inst_gate.unsqueeze(-1).unsqueeze(-1) # (b, 32, 1, 1)
+            global_feats = global_feats * inst_gate # modulated_feats  (b, 32, h, w)
+            
             cond_instance_feats = self.coord_attention(global_feats)
         else:
             cond_instance_feats = torch.cat(
