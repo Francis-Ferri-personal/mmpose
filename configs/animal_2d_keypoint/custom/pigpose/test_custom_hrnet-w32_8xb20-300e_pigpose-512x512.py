@@ -30,7 +30,12 @@ default_hooks = dict(checkpoint=dict(save_best='coco/AP', rule='greater', max_ke
 
 # codec settings
 codec = dict(
-    type='DecoupledHeatmap', input_size=(512, 512), heatmap_size=(128, 128))
+    type='DecoupledHeatmapBbox', 
+    input_size=(512, 512), 
+    heatmap_size=(128, 128), 
+    root_type='bbox_center_real', # Chosen because instances have a lot of cropping and occlusions; alternative is 'kpt_center' which averages visible keypoints
+    bbox_format = 'x1y1x2y2'
+)
 
 # model settings
 model = dict(
@@ -83,12 +88,24 @@ model = dict(
         in_channels=480,
         num_keypoints=19,
         gfd_channels=32,
+        use_bbox=False,
+        rel_pos_enc_start=True, # Relative positional encoding start
+        coord_att_type='PreFiLM-Gated', # 'Default', 'Concatenated' 'PreFiLM', 'PreFiLM-Gated'
+        rel_pos_enc_end=True, # Relative positional encoding end
         coupled_heatmap_loss=dict(type='FocalHeatmapLoss', loss_weight=1.0),
         decoupled_heatmap_loss=dict(type='FocalHeatmapLoss', loss_weight=4.0),
         contrastive_loss=dict(
             type='InfoNCELoss', temperature=0.05, loss_weight=1.0),
-        decoder=codec,
-        conv_type='Conv2d', # 1x1Conv, Conv2d, DepthwiseSeparableConvModule, DilatedConv, DeformConv2d, AdaptiveRotatedConv2d
+        bbox_loss=dict( 
+            type='IoULoss',
+            mode='square', # When squaring the IoU, it is penalized more heavily when the overlap is low.
+            eps=1e-16,
+            reduction='sum',
+            loss_weight=1.0
+        ),
+            decoder=codec,
+        conv_type='1x1Conv', # 1x1Conv, Conv2d, DepthwiseSeparableConvModule, DilatedConv, DeformConv2d, AdaptiveRotatedConv2d
+        # bbox_format=codec["bbox_format"]
     ),
     train_cfg=dict(max_train_instances=200),
     test_cfg=dict(
@@ -105,6 +122,9 @@ data_root = 'data/'
 # pipelines
 train_pipeline = [
     dict(type='LoadImage'),
+    # BottomupRandomAffine with shift_factor=0.1 and transform_mode='perspective'
+    # This transformation can move (translate/rotate/scale) the image and associated bboxes, and cause some bboxes to fall partially or completely outside the image border.
+    # NOTE: I will truncate by myself the results. I mean make the bbox be upto 0 no less. now due to the cordinate scheme of the BottomupRandomAffine I am having negative coords. 
     dict(type='BottomupRandomAffine', input_size=codec['input_size']),
     dict(type='RandomFlip', direction='horizontal'),
     dict(type='GenerateTarget', encoder=codec),
@@ -129,7 +149,7 @@ val_pipeline = [
 
 # data loaders
 train_dataloader = dict(
-    batch_size=20,
+    batch_size=2,
     num_workers=2,
     persistent_workers=True,
     sampler=dict(type='DefaultSampler', shuffle=True),

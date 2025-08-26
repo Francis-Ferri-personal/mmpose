@@ -759,13 +759,15 @@ class CustomGFDModule(BaseModule):
         clamp_delta: float = 1e-4,
         init_cfg: OptConfigType = None,
         use_bbox: bool = True,
+        rel_pos_enc_start: bool = False,
         coord_att_type: bool = False,
-        rel_pos_start: bool = True
+        rel_pos_enc_end: bool = False
     ):
         super().__init__(init_cfg=init_cfg)
         self.use_bbox = use_bbox
+        self.rel_pos_enc_start = rel_pos_enc_start
         self.coord_att_type = coord_att_type
-        self.rel_pos_enc_start = rel_pos_start
+        self.rel_pos_enc_end = rel_pos_enc_end
     
         # TODO: Deformable Convolutions
         
@@ -844,6 +846,9 @@ class CustomGFDModule(BaseModule):
 
             It is typically a 1×1 convolution where out_channels = num_keypoints.
         """
+
+        if self.rel_pos_enc_end:
+            gfd_channels = gfd_channels + 2
 
         self.heatmap_conv = get_conv_operation(
             conv_type=conv_type,
@@ -980,6 +985,15 @@ class CustomGFDModule(BaseModule):
             cond_instance_feats = self.fuse_attention(cond_instance_feats) # [num_instances, 32, 128, 128])
             cond_instance_feats = torch.nn.functional.relu(cond_instance_feats)
             
+        if self.rel_pos_enc_end:
+            # HACK: WARNING: Using relative positional encoding at the end of GFD might be redundant if already applied at the start.
+            pixel_coords = get_pixel_coords((h, w), feats.device)
+            relative_coords = instance_coords.reshape(
+                -1, 1, 2) - pixel_coords.reshape(1, -1, 2)
+            relative_coords = relative_coords.permute(0, 2, 1) / h
+            relative_coords = relative_coords.reshape(cond_instance_feats.shape[0], 2, h, w)
+            cond_instance_feats = torch.cat((cond_instance_feats, relative_coords), dim=1) # [num_instances, 32 + 2, 128, 128]
+
         cond_instance_feats = self.heatmap_conv(cond_instance_feats) # num_channels: 32 -> 19 (this is num_keypoints)    i.e. [num_instances, 19, 128, 128]
         heatmaps = self.sigmoid(cond_instance_feats)
 
@@ -1000,7 +1014,9 @@ class CustomHead(BaseHead):
                  num_keypoints: int,
                  prior_prob: float = 0.01,
                  use_bbox: bool =  False,
+                 rel_pos_enc_start: bool = False,
                  coord_att_type: bool = False,
+                 rel_pos_enc_end: bool = False,
                  # TODO: Check loses
                  coupled_heatmap_loss: OptConfigType = dict(
                      type='FocalHeatmapLoss'),
@@ -1023,7 +1039,9 @@ class CustomHead(BaseHead):
         self.num_keypoints = num_keypoints
 
         self.use_bbox = use_bbox
+        self.rel_pos_enc_start = rel_pos_enc_start
         self.coord_att_type = coord_att_type
+        self.rel_pos_enc_end = rel_pos_enc_end
 
         if decoder is not None:
             self.decoder = KEYPOINT_CODECS.build(decoder)
@@ -1080,7 +1098,9 @@ class CustomHead(BaseHead):
                         bias=bias_value))
             ],
             use_bbox=self.use_bbox,
-            coord_att_type=self.coord_att_type)
+            rel_pos_enc_start=self.rel_pos_enc_start,
+            coord_att_type=self.coord_att_type,
+            rel_pos_enc_end=self.rel_pos_enc_end)
 
         # TODO check different lose functions
         # build losses
