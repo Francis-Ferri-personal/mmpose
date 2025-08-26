@@ -706,6 +706,32 @@ class InstanceConcatenatedCoordAtt(nn.Module):
 
         return out
     
+def get_pixel_coords(heatmap_size: Tuple, device: str = 'cpu'):
+        """Get pixel coordinates for each element in the heatmap.
+
+        Args:
+            heatmap_size (tuple): Size of the heatmap in (W, H) format.
+            device (str): Device to put the resulting tensor on.
+
+        Returns:
+            Tensor of shape (batch_size, num_pixels, 2) containing the pixel
+            coordinates for each element in the heatmap.
+
+        Comment:
+            Generates a grid of (x, y) pixel coordinates for the heatmap. For example, if heatmap size is W=3, H=2, output is:
+                [[[0.5, 0.5],
+                [1.5, 0.5],
+                [2.5, 0.5],
+                [0.5, 1.5],
+                [1.5, 1.5],
+                [2.5, 1.5]]]
+            This gives precise location information in floating-point values for each pixel.
+        """
+        w, h = heatmap_size
+        y, x = torch.meshgrid(torch.arange(h), torch.arange(w))
+        pixel_coords = torch.stack((x, y), dim=-1).reshape(-1, 2)
+        pixel_coords = pixel_coords.float().to(device) + 0.5
+        return pixel_coords
 
 
 class CustomGFDModule(BaseModule):
@@ -733,11 +759,13 @@ class CustomGFDModule(BaseModule):
         clamp_delta: float = 1e-4,
         init_cfg: OptConfigType = None,
         use_bbox: bool = True,
-        coord_att_type: bool = False
+        coord_att_type: bool = False,
+        rel_pos_start: bool = True
     ):
         super().__init__(init_cfg=init_cfg)
         self.use_bbox = use_bbox
         self.coord_att_type = coord_att_type
+        self.rel_pos_enc_start = rel_pos_start
     
         # TODO: Deformable Convolutions
         
@@ -763,6 +791,9 @@ class CustomGFDModule(BaseModule):
 
         if self.use_bbox:
             gfd_channels = gfd_channels + 1
+
+        if self.rel_pos_enc_start:
+            gfd_channels = gfd_channels + 2
 
         if self.coord_att_type == "Default":
             # Coordinate attention without instance information
@@ -844,7 +875,7 @@ class CustomGFDModule(BaseModule):
         Returns:
             A tensor containing decoupled heatmaps.
         """
-
+        b, _, h, w = feats.size() # [batch_size, 480, 128, 128]
         # TODO: podiramos ahorrarnos el downsamplig si hacemos de mas canales la convolucion de IIA y usamos la segunda mitad
         
         # feats  (b, 480, 128, 128)
@@ -859,10 +890,10 @@ class CustomGFDModule(BaseModule):
         global_feats = global_feats[instance_imgids] # [num_instances, 32, 128, 128]
         # IMPORTANT: TODO: Think if it is better to use mask  before or after first convolution.
         if self.use_bbox:
-            b, _, w, h = global_feats.shape
+            b, _, h, w = global_feats.shape
             # b, _ = intance_bboxes.shape
             # TODO TODO: FIND ERROR HERE
-            intance_bboxes = (intance_bboxes * torch.tensor([w, h, w, h], device=intance_bboxes.device))
+            intance_bboxes = (intance_bboxes * torch.tensor([h, w, h, w], device=intance_bboxes.device))
             # print(w, h)
             # print(intance_bboxes.shape)
             # print("intance_bboxes", intance_bboxes[:3])
@@ -870,10 +901,10 @@ class CustomGFDModule(BaseModule):
             intance_bboxes = torch.clamp(
                 intance_bboxes,
                 min=torch.tensor([0, 0, 0, 0], device=intance_bboxes.device),
-                max=torch.tensor([w, h, w, h], device=intance_bboxes.device)
+                max=torch.tensor([h, w, h, w], device=intance_bboxes.device)
             ).long()
 
-            bbox_mask = torch.zeros((b, 1, w, h), device=feats.device) 
+            bbox_mask = torch.zeros((b, 1, h, w), device=feats.device) 
             for i in range(b):
                 x1, y1, x2, y2 = intance_bboxes[i] # xmin, ymin, xmax, ymax
                 # print("HERERERERE:", x1, y1, x2, y2)
@@ -908,6 +939,16 @@ class CustomGFDModule(BaseModule):
             # TODO: we are using only a binary mask. Use a gaussian
             # Concat bbox mask at the end of global_feats
             global_feats = torch.cat((global_feats, bbox_mask), dim=1)
+
+        if self.rel_pos_enc_start:
+            pixel_coords = get_pixel_coords((h, w), feats.device)
+            relative_coords = instance_coords.reshape(
+                -1, 1, 2) - pixel_coords.reshape(1, -1, 2)
+            relative_coords = relative_coords.permute(0, 2, 1) / h # Normalize between 0-1 # NOTE: If different h, w we apply individually
+            # the channels are ordered in (dx, dy) that are  the offset to the reference point center of instance. 
+            relative_coords = relative_coords.reshape(global_feats.shape[0], 2, h, w)
+
+            global_feats = torch.cat((global_feats, relative_coords), dim=1) # [num_instances, 32 + 2, 128, 128]
 
         if self.coord_att_type == "Default":
             cond_instance_feats = self.coord_attention(global_feats)
