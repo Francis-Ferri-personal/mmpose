@@ -147,6 +147,27 @@ class FeatureExtractor:
         
         return instance_feats
     
+    @staticmethod
+    def sample_feats_per_instance(feats: torch.Tensor, coords: torch.Tensor) -> torch.Tensor:
+        """
+        Sample feature vectors at specific coordinates for each instance in the batch.
+
+        Args:
+            feats (Tensor): Global feature maps, shape [B, C, H, W].
+            coords (Tensor): Instance coordinates, shape [B, 2] (x=w, y=h).
+
+        Returns:
+            Tensor: Sampled feature vectors, shape [B, C].
+        """
+        B, C, H, W = feats.shape
+
+        # Split coordinates into width (x) and height (y)
+        w, h = coords[:, 0].long(), coords[:, 1].long()
+
+        # Index feats using height and width
+        instance_feats = feats[torch.arange(B), :, h, w]  # [B, C]
+
+        return instance_feats
     
 
 # TODO: Rename it as OIIA for Optimized or UIIA
@@ -779,12 +800,14 @@ class CustomGFDModule(BaseModule):
         init_cfg: OptConfigType = None,
         use_bbox: bool = True,
         rel_pos_enc_start: bool = False,
+        similarity_type: str = None,
         coord_att_type: bool = False,
         rel_pos_enc_end: bool = False
     ):
         super().__init__(init_cfg=init_cfg)
         self.use_bbox = use_bbox
         self.rel_pos_enc_start = rel_pos_enc_start
+        self.similarity_type = similarity_type
         self.coord_att_type = coord_att_type
         self.rel_pos_enc_end = rel_pos_enc_end
     
@@ -814,7 +837,10 @@ class CustomGFDModule(BaseModule):
             gfd_channels = gfd_channels + 1
 
         if self.rel_pos_enc_start:
-            gfd_channels = gfd_channels + 2
+            gfd_channels = gfd_channels + 2 
+
+        if self.similarity_type == "Cosine":
+            gfd_channels = gfd_channels + 1 # We add one channel with the similarity map
 
         if self.coord_att_type == "Default":
             # Coordinate attention without instance information
@@ -974,6 +1000,20 @@ class CustomGFDModule(BaseModule):
 
             global_feats = torch.cat((global_feats, relative_coords), dim=1) # [num_instances, 32 + 2, 128, 128]
 
+        if self.similarity_type == "Cosine":
+            # TODO: Correct this: 
+            instance_feats_reduced = FeatureExtractor.sample_feats_per_instance(global_feats, instance_coords) # (b, 32 approx, h, w), (b, 2) +> (b, 32)
+            instance_feats_reduced = F.normalize(instance_feats_reduced, dim=1) # (b, c) # Normalize instance features channel-wise [0:1]
+            global_feats_norm = F.normalize(global_feats, dim=1) # (b, c, h, w)
+            # expand instance to 2D
+            inst_feats_exp = instance_feats_reduced.unsqueeze(-1).unsqueeze(-1) # (b, c, 1, 1)
+            # cosine similarity per pixel
+            sim_map = (global_feats_norm * inst_feats_exp).sum(dim=1, keepdim=True)  # (b, 1, h, w)
+            # optional: activation
+            sim_map = sim_map.sigmoid()
+            # concat with global_feats
+            global_feats = torch.cat((global_feats, sim_map), dim=1) # [num_instances, 32 + 1, 128, 128]
+
         if self.coord_att_type == "Default":
             cond_instance_feats = self.coord_attention(global_feats)
             # NOTE: I am not sing relu because it can remove negative values that are valuable information from the feature map.
@@ -1036,6 +1076,7 @@ class CustomHead(BaseHead):
                  prior_prob: float = 0.01,
                  use_bbox: bool =  False,
                  rel_pos_enc_start: bool = False,
+                 similarity_type: str = None,
                  coord_att_type: bool = False,
                  rel_pos_enc_end: bool = False,
                  # TODO: Check loses
@@ -1060,9 +1101,6 @@ class CustomHead(BaseHead):
         self.num_keypoints = num_keypoints
 
         self.use_bbox = use_bbox
-        self.rel_pos_enc_start = rel_pos_enc_start
-        self.coord_att_type = coord_att_type
-        self.rel_pos_enc_end = rel_pos_enc_end
 
         if decoder is not None:
             self.decoder = KEYPOINT_CODECS.build(decoder)
@@ -1121,9 +1159,10 @@ class CustomHead(BaseHead):
                         bias=bias_value))
             ],
             use_bbox=self.use_bbox,
-            rel_pos_enc_start=self.rel_pos_enc_start,
-            coord_att_type=self.coord_att_type,
-            rel_pos_enc_end=self.rel_pos_enc_end)
+            rel_pos_enc_start=rel_pos_enc_start,
+            similarity_type=similarity_type,
+            coord_att_type=coord_att_type,
+            rel_pos_enc_end=rel_pos_enc_end)
 
         # TODO check different lose functions
         # build losses
