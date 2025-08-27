@@ -839,7 +839,7 @@ class CustomGFDModule(BaseModule):
         if self.rel_pos_enc_start:
             gfd_channels = gfd_channels + 2 
 
-        if self.similarity_type == "Cosine":
+        if self.similarity_type is not None:
             gfd_channels = gfd_channels + 1 # We add one channel with the similarity map
 
         if self.coord_att_type == "Default":
@@ -1001,7 +1001,6 @@ class CustomGFDModule(BaseModule):
             global_feats = torch.cat((global_feats, relative_coords), dim=1) # [num_instances, 32 + 2, 128, 128]
 
         if self.similarity_type == "Cosine":
-            # TODO: Correct this: 
             instance_feats_reduced = FeatureExtractor.sample_feats_per_instance(global_feats, instance_coords) # (b, 32 approx, h, w), (b, 2) +> (b, 32)
             instance_feats_reduced = F.normalize(instance_feats_reduced, dim=1) # (b, c) # Normalize instance features channel-wise [0:1]
             global_feats_norm = F.normalize(global_feats, dim=1) # (b, c, h, w)
@@ -1013,6 +1012,19 @@ class CustomGFDModule(BaseModule):
             sim_map = sim_map.sigmoid()
             # concat with global_feats
             global_feats = torch.cat((global_feats, sim_map), dim=1) # [num_instances, 32 + 1, 128, 128]
+        elif self.similarity_type == "Cross-correlation":
+            _, c, _, _ = global_feats.shape
+            # expand instance features to multiply by each pixel
+            instance_feats_reduced = FeatureExtractor.sample_feats_per_instance(global_feats, instance_coords) # (b, 32 approx, h, w), (b, 2) +> (b, 32)
+            inst_feats_exp = instance_feats_reduced.unsqueeze(-1).unsqueeze(-1)  # [b, c, 1, 1]
+            # cross-correlation per pixel
+            corr_map = (global_feats * inst_feats_exp).sum(dim=1, keepdim=True)  # [b, 1, h, w]
+            # optional: scale by sqrt(C) attention style
+            corr_map = corr_map / math.sqrt(c)
+            # optional: apply sigmoid activation to make it a [0,1] mask
+            corr_map = corr_map.sigmoid()
+            # concatenate to original feature map
+            global_feats = torch.cat((global_feats, corr_map), dim=1)  # [b, c+1, h, w]
 
         if self.coord_att_type == "Default":
             cond_instance_feats = self.coord_attention(global_feats)
