@@ -592,6 +592,9 @@ class CoordAtt(nn.Module):
     # TODO: Put a fix value instead of reduction
     def __init__(self, inp, oup, use_reduction=False, reduction=32, mip_channels=32):
         super(CoordAtt, self).__init__()
+        self.inp = inp
+        self.oup = oup
+        
         # NOTE: I replace this with normal implementation because it hasa non deterministic implementation
         # self.pool_h = nn.AdaptiveAvgPool2d((None, 1)) # None keeps the dimension size equal to the input width
         # self.pool_w = nn.AdaptiveAvgPool2d((1, None)) # None keeps the dimension size equal to the input height
@@ -606,6 +609,9 @@ class CoordAtt(nn.Module):
         
         self.conv_h = nn.Conv2d(mip, oup, kernel_size=1, stride=1, padding=0)
         self.conv_w = nn.Conv2d(mip, oup, kernel_size=1, stride=1, padding=0)
+        
+        if self.inp != self.oup:
+            self.shortcut = nn.Conv2d(self.inp, self.oup, kernel_size=1, stride=1, padding=0)
         
 
     def forward(self, x):
@@ -631,6 +637,9 @@ class CoordAtt(nn.Module):
         a_h = self.conv_h(x_h).sigmoid()
         a_w = self.conv_w(x_w).sigmoid()
 
+        if self.inp != self.oup:
+            identity = self.shortcut(identity)
+
         out = identity * a_w * a_h
 
         return out
@@ -642,8 +651,8 @@ class InstanceConcatenatedCoordAtt(nn.Module):
     # TODO: Put a fix value instead of reduction
     def __init__(self, inp, oup, inst_emb_dim=480, use_reduction=False, reduction=32, mip_channels=32):
         super(InstanceConcatenatedCoordAtt, self).__init__()
-        self.inp = inp
-        self.oup = oup
+        self.inp = inp # 128
+        self.oup = oup # 32
         self.inst_emb_dim = inst_emb_dim
         # NOTE: I replace this with normal implementation because it hasa non deterministic implementation
         # self.pool_h = nn.AdaptiveAvgPool2d((None, 1)) # None keeps the dimension size equal to the input width
@@ -666,6 +675,10 @@ class InstanceConcatenatedCoordAtt(nn.Module):
         
         self.conv_h = nn.Conv2d(mip, oup, kernel_size=1, stride=1, padding=0)
         self.conv_w = nn.Conv2d(mip, oup, kernel_size=1, stride=1, padding=0)
+
+        # Shortcut if input and output channels differ
+        if self.inp != self.oup:
+            self.shortcut = nn.Conv2d(self.inp, self.oup, kernel_size=1, stride=1, padding=0)
         
 
     def forward(self, x, inst_feats):
@@ -701,6 +714,10 @@ class InstanceConcatenatedCoordAtt(nn.Module):
         # Attention weights
         a_h = self.conv_h(x_h).sigmoid()
         a_w = self.conv_w(x_w).sigmoid()
+
+        # Apply shortcut if input and output channels differ
+        if self.inp != self.oup:
+            identity = self.shortcut(identity)
 
         out = identity * a_w * a_h
 
@@ -756,6 +773,8 @@ class CustomGFDModule(BaseModule):
         in_channels: int,
         out_channels: int,
         gfd_channels: int,
+        att_channels: int,
+        gfd_inter_channels: int,
         clamp_delta: float = 1e-4,
         init_cfg: OptConfigType = None,
         use_bbox: bool = True,
@@ -799,44 +818,44 @@ class CustomGFDModule(BaseModule):
 
         if self.coord_att_type == "Default":
             # Coordinate attention without instance information
-            self.coord_attention = CoordAtt(gfd_channels, gfd_channels, mip_channels=32)
+            self.coord_attention = CoordAtt(gfd_channels, gfd_inter_channels, mip_channels=att_channels)
         elif self.coord_att_type == "Concatenated":
             # Coordinate attention with instance information concatenated and repeated per pixel.
             # It applies 1x1 conv in the polled h and polled w axi
             self.coord_attention = InstanceConcatenatedCoordAtt(
                 inp=gfd_channels,
-                oup=gfd_channels,
-                mip_channels=32)
+                oup=gfd_inter_channels,
+                mip_channels=att_channels)
             
         # NOTE: These ones is not going to conditionate the coordinate attention which is bad. (Try to avoid POST and Dual)
         # TODO: We can try post coord attention film 
         # TODO: Dual-path (parallel): apply coordinate attention in one banch and apply film in annoter. COncatenate and 1x1 conv
         elif self.coord_att_type == "PreFiLM":
             self.mlp = nn.Sequential(
-                nn.Linear(480, 128),
+                nn.Linear(in_channels, in_channels // 4),
                 nn.ReLU(inplace=True),
-                nn.Linear(128, gfd_channels),
-                nn.Sigmoid()  # escala entre 0-1
+                nn.Linear(in_channels // 4, gfd_channels),
+                # NOTE: No sigmoid here because we want to have negative values too
             )
-            self.coord_attention = CoordAtt(gfd_channels, gfd_channels, mip_channels=32)
+            self.coord_attention = CoordAtt(gfd_channels, gfd_inter_channels, mip_channels=att_channels)
         elif self.coord_att_type == "PreFiLM-Gated":
             self.mlp = nn.Sequential(
-                nn.Linear(480, 128),
+                nn.Linear(in_channels, in_channels // 4),
                 nn.ReLU(inplace=True),
-                nn.Linear(128, gfd_channels),
+                nn.Linear(in_channels // 4, gfd_channels),
                 nn.Sigmoid()  # escala entre 0-1
             )
             self.sigmoid_gating = TruncSigmoid(min=clamp_delta, max=1 - clamp_delta)
-            self.coord_attention = CoordAtt(gfd_channels, gfd_channels, mip_channels=32)
+            self.coord_attention = CoordAtt(gfd_channels, gfd_inter_channels, mip_channels=att_channels)
         else:
-            self.channel_attention = ChannelAttention(in_channels, gfd_channels)
+            self.channel_attention = ChannelAttention(gfd_channels, gfd_inter_channels)
             # TODO: we could change the spatial attention with something more advanced.
-            self.spatial_attention = SpatialAttention(in_channels, gfd_channels, conv_type)
+            self.spatial_attention = SpatialAttention(gfd_channels, gfd_inter_channels, conv_type)
             
             self.fuse_attention = get_conv_operation(
                 conv_type=conv_type,
-                in_channels=gfd_channels * 2,
-                out_channels=gfd_channels,
+                in_channels=gfd_inter_channels * 2,
+                out_channels=gfd_inter_channels,
                 # kernel_size=1)
                 kernel_size=3)
         
@@ -848,11 +867,11 @@ class CustomGFDModule(BaseModule):
         """
 
         if self.rel_pos_enc_end:
-            gfd_channels = gfd_channels + 2
+            gfd_inter_channels = gfd_inter_channels + 2
 
         self.heatmap_conv = get_conv_operation(
             conv_type=conv_type,
-            in_channels=gfd_channels,
+            in_channels=gfd_inter_channels,
             out_channels=out_channels, # num_keypoints
             # kernel_size=1)
             kernel_size=3)
@@ -1011,6 +1030,8 @@ class CustomHead(BaseHead):
     def __init__(self,
                  in_channels: Union[int, Sequence[int]],
                  gfd_channels: int,
+                 att_channels: int,
+                 gfd_inter_channels: int,
                  num_keypoints: int,
                  prior_prob: float = 0.01,
                  use_bbox: bool =  False,
@@ -1026,7 +1047,7 @@ class CustomHead(BaseHead):
                  bbox_loss: OptConfigType = dict(type='IoULoss'), # IoULoss, squared
 
                  # My customizations
-                 conv_type: str = 'Conv2d',
+                 conv_type: str = '1x1Conv',
 
                  decoder: OptConfigType = None,
                  init_cfg: OptConfigType = None):
@@ -1086,6 +1107,8 @@ class CustomHead(BaseHead):
             in_channels,
             num_keypoints,
             gfd_channels,
+            att_channels,
+            gfd_inter_channels,
             init_cfg=init_cfg + [
                 dict(
                     type='Normal',
@@ -1137,7 +1160,7 @@ class CustomHead(BaseHead):
         """
         feats = feats[-1]
         instance_info = self.custom_iia_module.forward_test(feats, {})
-        instance_feats, instance_coords, instance_scores = instance_info
+        instance_feats, instance_coords, _, _ = instance_info # instance_scores, instance_bboxes
         # This tensor maps each instance to the index of its corresponding image in the batch.
         #  Example: 3 instances all from image 0 in batch
         instance_imgids = torch.zeros(

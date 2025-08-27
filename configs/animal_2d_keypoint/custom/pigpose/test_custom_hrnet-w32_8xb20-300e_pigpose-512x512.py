@@ -87,10 +87,14 @@ model = dict(
         type='CustomHead',
         in_channels=480,
         num_keypoints=19,
-        gfd_channels=32,
+        gfd_channels=128,
+        att_channels=16, # Note: maybe 16 is too few
+        gfd_inter_channels=32, # NOTE: Usual implementation =  gfd_inter_channels = gfd_channels for coord attention
+        # TODO: Try with att_channels = 32 and gfd_channels, gfd_inter_channels = 128
+        # TODO: try with att_channels = 16 and gfd_channels, gfd_inter_channels = 32
         use_bbox=False,
         rel_pos_enc_start=True, # Relative positional encoding start
-        coord_att_type='PreFiLM-Gated', # 'Default', 'Concatenated' 'PreFiLM', 'PreFiLM-Gated'
+        coord_att_type='PreFiLM-Gated', # 'Default', 'Concatenated' 'PreFiLM', 'PreFiLM-Gated', None
         rel_pos_enc_end=True, # Relative positional encoding end
         coupled_heatmap_loss=dict(type='FocalHeatmapLoss', loss_weight=1.0),
         decoupled_heatmap_loss=dict(type='FocalHeatmapLoss', loss_weight=4.0),
