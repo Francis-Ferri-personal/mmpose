@@ -95,10 +95,12 @@ model = dict(
         use_bbox=False,
         rel_pos_enc_start=True, # Relative positional encoding start
         similarity_type="Cross-correlation", # 'Cosine', 'Cross-correlation', None
-        coord_att_type='PreFiLM-Gated', # 'Default', 'Concatenated' 'PreFiLM', 'PreFiLM-Gated', None
+        coord_att_type='Concatenated', # 'Default', 'Concatenated' 'PreFiLM', 'PreFiLM-Gated', None
         rel_pos_enc_end=True, # Relative positional encoding end
         coupled_heatmap_loss=dict(type='FocalHeatmapLoss', loss_weight=1.0),
         decoupled_heatmap_loss=dict(type='FocalHeatmapLoss', loss_weight=4.0),
+        use_adaptive_wing=True,
+        adaptive_wing_loss=dict(type='AdaptiveWingLoss', loss_weight=12.0),
         contrastive_loss=dict(
             type='InfoNCELoss', temperature=0.05, loss_weight=1.0),
         bbox_loss=dict( 

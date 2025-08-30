@@ -1,6 +1,6 @@
 import math
 from typing import Dict, Optional, Sequence, Tuple, Union
-
+import numpy as np
 
 import torch
 import torch.nn as nn
@@ -1096,6 +1096,9 @@ class CustomHead(BaseHead):
                      type='FocalHeatmapLoss'),
                  decoupled_heatmap_loss: OptConfigType = dict(
                      type='FocalHeatmapLoss'),
+                 use_adaptive_wing: bool = False,
+                 adaptive_wing_loss: OptConfigType=dict(
+                     type='AdaptiveWingLoss'),
                  contrastive_loss: OptConfigType = dict(type='InfoNCELoss'),
                  bbox_loss: OptConfigType = dict(type='IoULoss'), # IoULoss, squared
 
@@ -1113,6 +1116,7 @@ class CustomHead(BaseHead):
         self.num_keypoints = num_keypoints
 
         self.use_bbox = use_bbox
+        self.use_adaptive_wing = use_adaptive_wing
 
         if decoder is not None:
             self.decoder = KEYPOINT_CODECS.build(decoder)
@@ -1182,6 +1186,7 @@ class CustomHead(BaseHead):
             dict(
                 heatmap_coupled=MODELS.build(coupled_heatmap_loss),
                 heatmap_decoupled=MODELS.build(decoupled_heatmap_loss),
+                adaptive_wing=MODELS.build(adaptive_wing_loss),
                 contrastive=MODELS.build(contrastive_loss),
                 bbox=MODELS.build(bbox_loss)
             ))
@@ -1507,6 +1512,7 @@ class CustomHead(BaseHead):
         } 
 
         # pred instances & gt_instances: [num_instances, 19, 128, 128]
+        # TODO: Get 
         if len(instance_imgids) > 0:
             # print("PRED", pred_instance_heatmaps)
             # print("GT", gt_instance_heatmaps)
@@ -1519,6 +1525,12 @@ class CustomHead(BaseHead):
                 'loss/contrastive':
                 contrastive_loss
             }
+
+            if self.use_adaptive_wing:
+                loss_data['loss/adaptive_wing'] = \
+                    self.loss_module['adaptive_wing'](
+                        pred_instance_heatmaps, gt_instance_heatmaps,
+                        keypoint_weights)
             
             if self.use_bbox:
                 loss_data['loss/bbox'] = bbox_loss
