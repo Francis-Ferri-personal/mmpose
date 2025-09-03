@@ -17,6 +17,7 @@ from mmpose.utils.typing import (ConfigType, Features, OptConfigType,
                                  OptSampleList, Predictions)
 from ..base_head import BaseHead
 from .utils import AdaptiveRotatedConv2d, RountingFunction
+from .utils.post_processing import get_heatmaps_maximums
 
 MODELS.register_module('DepthwiseSeparableConvModule', module=DepthwiseSeparableConvModule)
 # Reference: https://www.youtube.com/watch?v=6TtOuVJ9GBQ
@@ -1099,6 +1100,8 @@ class CustomHead(BaseHead):
                  use_adaptive_wing: bool = False,
                  adaptive_wing_loss: OptConfigType=dict(
                      type='AdaptiveWingLoss'),
+                 use_oks_loss=False,
+                    oks_loss: OptConfigType = dict(type='OKSLoss'),
                  contrastive_loss: OptConfigType = dict(type='InfoNCELoss'),
                  bbox_loss: OptConfigType = dict(type='IoULoss'), # IoULoss, squared
 
@@ -1117,6 +1120,7 @@ class CustomHead(BaseHead):
 
         self.use_bbox = use_bbox
         self.use_adaptive_wing = use_adaptive_wing
+        self.use_oks_loss = use_oks_loss
 
         if decoder is not None:
             self.decoder = KEYPOINT_CODECS.build(decoder)
@@ -1186,9 +1190,10 @@ class CustomHead(BaseHead):
             dict(
                 heatmap_coupled=MODELS.build(coupled_heatmap_loss),
                 heatmap_decoupled=MODELS.build(decoupled_heatmap_loss),
-                adaptive_wing=MODELS.build(adaptive_wing_loss),
+                adaptive_wing=MODELS.build(adaptive_wing_loss) if self.use_adaptive_wing else None,
                 contrastive=MODELS.build(contrastive_loss),
-                bbox=MODELS.build(bbox_loss)
+                bbox=MODELS.build(bbox_loss) if self.use_bbox else None, 
+                oks=MODELS.build(oks_loss) if self.use_oks_loss else None
             ))
         
         
@@ -1381,7 +1386,8 @@ class CustomHead(BaseHead):
         gt_heatmaps, gt_instance_coords, keypoint_weights = [], [], []
         heatmap_mask = []
 
-        instance_imgids, gt_instance_heatmaps, gt_instance_bboxes  = [], [], []
+        instance_imgids, gt_instance_heatmaps  = [], []
+        gt_instance_keypoints, gt_instance_kps_visibility, gt_instance_areas, gt_instance_bboxes = [], [], [], []
         for i, d in enumerate(batch_data_samples):
             gt_heatmaps.append(d.gt_fields.heatmaps) # [20 (num_keypoints + root), 128, 128]
             gt_instance_coords.append(d.gt_instance_labels.instance_coords) # [num_instances, 2]
@@ -1401,9 +1407,18 @@ class CustomHead(BaseHead):
             if 'heatmap_mask' in d.gt_fields:
                 heatmap_mask.append(d.gt_fields.heatmap_mask)
 
+            # Additional fields for more losses
             if 'instance_bboxes' in d.gt_instance_labels:
                 gt_instance_bboxes.append(d.gt_instance_labels.instance_bboxes) # [num_instances, 4] this means 4 => (xmin, ymin, xmax, ymax)
 
+            if 'instance_keypoints' in d.gt_instance_labels:
+                gt_instance_keypoints.append(d.gt_instance_labels.instance_keypoints) # [num_instances, num_keypoints, 2]
+            
+            if 'instance_kps_visible' in d.gt_instance_labels:
+                gt_instance_kps_visibility.append(d.gt_instance_labels.instance_kps_visible)
+            
+            if 'instance_areas' in d.gt_instance_labels:
+                gt_instance_areas.append(d.gt_instance_labels.instance_areas) # [num_instances, 1]
 
         # gt_heatmaps: per-keypoint heatmaps combining all image instances
         gt_heatmaps = torch.stack(gt_heatmaps)
@@ -1411,11 +1426,15 @@ class CustomHead(BaseHead):
         gt_instance_coords = torch.cat(gt_instance_coords, dim=0)
         # gt_instance_heatmaps: Separate per-keypoint heatmaps for each individual instance
         gt_instance_heatmaps = torch.cat(gt_instance_heatmaps, dim=0)
+        
         gt_instance_bboxes = torch.cat(gt_instance_bboxes, dim=0) if gt_instance_bboxes else None
+        gt_instance_keypoints = torch.cat(gt_instance_keypoints, dim=0) if gt_instance_keypoints else None
+        gt_instance_kps_visibility = torch.cat(gt_instance_kps_visibility, dim=0) if gt_instance_kps_visibility else None
+        gt_instance_areas = torch.cat(gt_instance_areas, dim=0) if gt_instance_areas else None
+        
         keypoint_weights = torch.cat(keypoint_weights, dim=0)
         instance_imgids = torch.cat(instance_imgids).to(gt_heatmaps.device)
         
-
         # feed-forward
         feats = feats[-1] # features from the backbone [3, 480, 128, 128]
         pred_instance_feats, pred_heatmaps, pred_instance_bboxes = self.custom_iia_module.forward_train( # [num_instances, 480], [b, 20, 128, 128], [b, 4]
@@ -1489,6 +1508,12 @@ class CustomHead(BaseHead):
             gt_instance_coords = gt_instance_coords[selected_indices]
             keypoint_weights = keypoint_weights[selected_indices]
             gt_instance_heatmaps = gt_instance_heatmaps[selected_indices]
+
+            gt_instance_bboxes = None if gt_instance_bboxes is None else gt_instance_bboxes[selected_indices]
+            gt_instance_keypoints = None if gt_instance_keypoints is None else gt_instance_keypoints
+            gt_instance_kps_visibility = None if gt_instance_kps_visibility is None else gt_instance_kps_visibility[selected_indices]
+            gt_instance_areas = None if gt_instance_areas is None else gt_instance_areas
+            
             instance_imgids = instance_imgids[selected_indices]
             pred_instance_feats = pred_instance_feats[selected_indices]
 
@@ -1497,6 +1522,7 @@ class CustomHead(BaseHead):
         intance_bboxes = None
         if self.use_bbox:
             intance_bboxes = pred_instance_bboxes
+        
         pred_instance_heatmaps = self.custom_gfd_module(feats, pred_instance_feats,
                                                  gt_instance_coords,
                                                  instance_imgids, intance_bboxes=intance_bboxes)
@@ -1534,6 +1560,15 @@ class CustomHead(BaseHead):
             
             if self.use_bbox:
                 loss_data['loss/bbox'] = bbox_loss
+
+            if self.use_oks_loss:
+                pred_instance_kpts, _ = get_heatmaps_maximums(pred_instance_heatmaps)
+
+                loss_data['loss/oks'] = self.loss_module['oks'](
+                    pred_instance_kpts,
+                    gt_instance_keypoints,
+                    gt_instance_kps_visibility,
+                    gt_instance_areas)
 
             losses.update(loss_data)
 

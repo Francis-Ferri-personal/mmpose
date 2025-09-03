@@ -101,6 +101,8 @@ model = dict(
         decoupled_heatmap_loss=dict(type='FocalHeatmapLoss', loss_weight=4.0),
         use_adaptive_wing=True,
         adaptive_wing_loss=dict(type='AdaptiveWingLoss', loss_weight=12.0),
+        use_oks_loss=True,
+        oks_loss=dict(type='OKSLoss', loss_weight=1.0),
         contrastive_loss=dict(
             type='InfoNCELoss', temperature=0.05, loss_weight=1.0),
         bbox_loss=dict( 

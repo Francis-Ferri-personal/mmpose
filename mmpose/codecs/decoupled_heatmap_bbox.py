@@ -80,6 +80,21 @@ def get_instance_root(keypoints: np.ndarray,
 
         return roots_coordinate, roots_visible
 
+def get_instance_area(bbox: np.ndarray) -> np.ndarray:
+    """Calculate the area of an instance bbox.
+
+    Args:
+        bbox (np.ndarray): Bounding box in shape (4,) which includes
+            coordinates of (xmin, ymin, xmax, ymax).
+
+    Returns:
+        np.ndarray: Area of the instance bbox.
+    """
+    # bbox in format (xmin, ymin, xmax, ymax)
+    width = max(0, bbox[2] - bbox[0])
+    height = max(0, bbox[3] - bbox[1])
+    area = width * height
+    return area
 
 
 @KEYPOINT_CODECS.register_module()
@@ -125,8 +140,11 @@ class DecoupledHeatmapBbox(DecoupledHeatmap):
 
     label_mapping_table = dict(
         keypoint_weights='keypoint_weights',
+        instance_keypoints='instance_keypoints',
+        instance_kps_visible='instance_kps_visible',
         instance_coords='instance_coords',
         instance_bboxes='instance_bboxes',
+        instance_areas='instance_areas',
     )
 
 
@@ -157,15 +175,24 @@ class DecoupledHeatmapBbox(DecoupledHeatmap):
         """
         if keypoints_visible is None:
             keypoints_visible = np.ones(keypoints.shape[:2], dtype=np.float32)
-        if bbox is None:
+        if bbox is None: # TODO We can rewrite this to avoid scaling
             # generate pseudo bbox via visible keypoints
-            bbox = get_instance_bbox(keypoints, keypoints_visible)
+            bbox = get_instance_bbox(keypoints, keypoints_visible) # NOTE: We left this as original. we are using other bboxes later
             bbox = np.tile(bbox, 2).reshape(-1, 4, 2)
             # corner order: left_top, left_bottom, right_top, right_bottom
             bbox[:, 1:3, 0] = bbox[:, 0:2, 0] # Copy x-coordinates from points 0–1 to points 1–2 to align bounding box edges vertically
 
         # keypoint coordinates in heatmap
         _keypoints = keypoints / self.scale_factor
+        
+        # keypoint visibility filtered
+        _keypoints_visible = keypoints_visible.copy()
+        # Set keypoints with coordinates outside the heatmap boundaries to invisible
+        x_out = (_keypoints[..., 0] < 0) | (_keypoints[..., 0] >= self.heatmap_size[0])
+        y_out = (_keypoints[..., 1] < 0) | (_keypoints[..., 1] >= self.heatmap_size[1])
+        _keypoints_visible[x_out | y_out] = 0
+
+
         # NOTE: bboxes come in corner format (four corner points for each box) 
         # NOTE: This values have the transformations of BottomupRandomAffine that means that the bboxes and keypoints could be outside of the normal range (negative values and more than input_size)
         _bbox = bbox.reshape(-1, 4, 2) / self.scale_factor 
@@ -185,7 +212,7 @@ class DecoupledHeatmapBbox(DecoupledHeatmap):
 
         # compute the root and scale of each instance
         roots, roots_visible = get_instance_root(_keypoints, keypoints_visible, bboxes, bbox_valid,
-                                                 self.root_type)
+                                                 self.root_type) # NOTE: We are using original keypoints_visible to determine the root visibility, any way this root has to be positive in the heatmap
         
         sigmas = self._get_instance_wise_sigmas(_bbox)
 
@@ -200,7 +227,7 @@ class DecoupledHeatmapBbox(DecoupledHeatmap):
         roots_visible = keypoint_weights[:, -1]
 
         # select instances
-        inst_roots, inst_indices, instance_bboxes = [], [], []
+        inst_keypoints, inst_kps_visible,  inst_roots, inst_indices, inst_bboxes, inst_areas = [], [], [], [], [], []
         # Calculates the diagonal length of the smallest rectangle covering all visible keypoints for each instance.
         diagonal_lengths = get_diagonal_lengths(_keypoints, keypoints_visible)
         for i in np.argsort(diagonal_lengths):
@@ -212,24 +239,31 @@ class DecoupledHeatmapBbox(DecoupledHeatmap):
             x = max(0, min(x, self.heatmap_size[0] - 1))
             y = max(0, min(y, self.heatmap_size[1] - 1))
             if (x, y) not in inst_roots:
+                inst_keypoints.append(_keypoints[i] * _keypoints_visible[i][:, None]) # It make zero the invisible keypoints
+                inst_kps_visible.append(_keypoints_visible[i])
                 inst_roots.append((x, y))
                 inst_indices.append(i)
-                instance_bboxes.append(bboxes[i]) # NOTE: We are adding cropped bboxes
+                inst_bboxes.append(bboxes[i]) # NOTE: We are adding cropped bboxes
+                inst_areas.append(get_instance_area(bboxes[i]))
+
         if len(inst_indices) > self.encode_max_instances:
             rand_indices = random.sample(
                 range(len(inst_indices)), self.encode_max_instances)
+            inst_keypoints = [inst_keypoints[i] for i in rand_indices]
+            inst_kps_visible = [inst_kps_visible[i] for i in rand_indices]
             inst_roots = [inst_roots[i] for i in rand_indices]
             inst_indices = [inst_indices[i] for i in rand_indices]
-            instance_bboxes = [instance_bboxes[i] for i in rand_indices]
+            inst_bboxes = [inst_bboxes[i] for i in rand_indices]
+            inst_areas = [inst_areas[i] for i in rand_indices]
         
         # Bbox default format: (xmin, ymin, xmax, ymax)
         empty_instance_bbox = np.empty((0, 4), dtype=np.float32)
         # Transform instance bboxes format
         if self.bbox_format == 'ltwh':
-            instance_bboxes = list(map(lambda i_bbox: bbox_xyxy2xywh(np.array(i_bbox).reshape(1, 4)), instance_bboxes))# =>(left, top, width, height) 
+            inst_bboxes = list(map(lambda i_bbox: bbox_xyxy2xywh(np.array(i_bbox).reshape(1, 4)), inst_bboxes))# =>(left, top, width, height) 
             empty_instance_bbox = np.empty((0, 4), dtype=np.float32)
         elif self.bbox_format == 'wh':
-            instance_bboxes = list(map(lambda i_bbox: bbox_xyxy2xywh(np.array(i_bbox).reshape(1, 4))[:, 2:], instance_bboxes))# => (left, top, width, height) => (width, height)
+            inst_bboxes = list(map(lambda i_bbox: bbox_xyxy2xywh(np.array(i_bbox).reshape(1, 4))[:, 2:], inst_bboxes))# => (left, top, width, height) => (width, height)
             empty_instance_bbox = np.empty((0, 2), dtype=np.float32)
 
         # generate instance-wise heatmaps
@@ -245,22 +279,33 @@ class DecoupledHeatmapBbox(DecoupledHeatmap):
             inst_heatmap_weights.append(inst_heatmap_weight)
 
         if len(inst_indices) > 0:
+            inst_keypoints = np.array(inst_keypoints, dtype=np.float32)
+            inst_kps_visible = np.array(inst_kps_visible, dtype=np.float32)
             inst_heatmaps = np.concatenate(inst_heatmaps)
             inst_heatmap_weights = np.concatenate(inst_heatmap_weights)
             inst_roots = np.array(inst_roots, dtype=np.int32)
-            instance_bboxes = np.array(instance_bboxes, dtype=np.float32)
+            inst_bboxes = np.array(inst_bboxes, dtype=np.float32)
+            inst_areas = np.array(inst_areas, dtype=np.float32)
         else:
+            inst_keypoints = np.empty((0, *keypoints.shape[1:]), dtype=np.float32) # (0, 19, 2)
+            inst_kps_visible = np.empty((0, *keypoints_visible.shape[1:]), dtype=np.float32) # (0, 19)
             inst_heatmaps = np.empty((0, *self.heatmap_size[::-1]))
             inst_heatmap_weights = np.empty((0, ))
             inst_roots = np.empty((0, 2), dtype=np.int32)
-            instance_bboxes = empty_instance_bbox
+            inst_bboxes = empty_instance_bbox
+            inst_areas = np.empty((0, ), dtype=np.float32)
+
 
         encoded = dict(
+            instance_keypoints=inst_keypoints,
+            instance_kps_visible=inst_kps_visible,
             heatmaps=heatmaps,
             instance_heatmaps=inst_heatmaps,
             keypoint_weights=inst_heatmap_weights,
             instance_coords=inst_roots,
-            instance_bboxes=instance_bboxes
-        )
+            instance_bboxes=inst_bboxes, # Bboxes in format (xmin, ymin, xmax, ymax) or (left, top, width, height) or (width, height)
+            instance_areas=inst_areas,
+            )
 
-        return encoded 
+        return encoded
+    
