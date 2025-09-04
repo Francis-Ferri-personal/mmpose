@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --account=def-kzn518
-#SBATCH --gpus=h100_3g.40gb:1
+#SBATCH --gpus=nvidia_h100_80gb_hbm3_3g.40gb:1
 #SBATCH --cpus-per-task=6
 #SBATCH --mem=140gb   
 #SBATCH --time=48:00:00
@@ -10,7 +10,7 @@ export CUBLAS_WORKSPACE_CONFIG=:4096:8
 
 # GET PARAMETERS AND VALIDATION
 usage() {
-    echo "Usage: $0 --config CONFIG_FILE --gpus NUM_GPUS --dataset DATASET"
+    echo "Usage: $0 --config CONFIG_FILE --dataset DATASET"
     exit 1
 }
 
@@ -20,16 +20,8 @@ while [[ $# -gt 0 ]]; do
             CONFIG_FILE="$2"
             shift 2
             ;;
-        --gpus)
-            NUM_GPUS="$2"
-            shift 2
-            ;;
         --dataset)
             DATASET="$2"
-            shift 2
-            ;;
-        --port)
-            PORT="$2"
             shift 2
             ;;
         --help)
@@ -43,7 +35,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # VALIDATE REQUIRED PARAMETERS
-if [[ -z "$CONFIG_FILE" || -z "$NUM_GPUS" || -z "$DATASET" || -z "$PORT" ]]; then
+if [[ -z "$CONFIG_FILE" || -z "$DATASET" ]]; then
     echo "Missing required parameters."
     usage
 fi
@@ -82,7 +74,7 @@ pip install -v -e .
 
 
 # RUN TRAINING
-PORT=${PORT} bash ./tools/dist_train.sh ${CONFIG_FILE} ${NUM_GPUS}
+bash ./tools/train.py ${CONFIG_FILE}
 
 
 # RUN EVALUATION
@@ -111,7 +103,7 @@ tar -cvf $projects/Outputs/${DATASET}/${EXPERIMENT_NAME}.tar work_dirs/${EXPERIM
 
 # RUN YOUR JOB
 # cd $project/Workspace/mmpose
-# sbatch tools/drac-train.sh --config configs/animal_2d_keypoint/topdown_heatmap/pigpose/td-hm_hrnet-w32_8xb64-210e_pigpose-256x256.py --gpus 2 --dataset pigpose --port 29501
+# sbatch tools/drac-train.sh --config configs/animal_2d_keypoint/topdown_heatmap/pigpose/td-hm_hrnet-w32_8xb64-210e_pigpose-256x256.py --dataset pigpose
 # NOTE: Change the port number to avoid conflicts 
 
 # CHECK YOUR JOB
