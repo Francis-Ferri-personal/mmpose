@@ -874,7 +874,7 @@ class CustomGFDModule(BaseModule):
             )
             self.sigmoid_gating = TruncSigmoid(min=clamp_delta, max=1 - clamp_delta)
             self.coord_attention = CoordAtt(gfd_channels, gfd_inter_channels, mip_channels=att_channels)
-        else:
+        else: # None  is channel and spatial as in CiD
             self.channel_attention = ChannelAttention(gfd_channels, gfd_inter_channels)
             # TODO: we could change the spatial attention with something more advanced.
             self.spatial_attention = SpatialAttention(gfd_channels, gfd_inter_channels, conv_type)
