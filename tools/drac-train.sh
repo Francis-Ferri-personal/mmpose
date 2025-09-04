@@ -3,7 +3,7 @@
 #SBATCH --gpus=nvidia_h100_80gb_hbm3_3g.40gb:1
 #SBATCH --cpus-per-task=6
 #SBATCH --mem=140gb   
-#SBATCH --time=48:00:00
+#SBATCH --time=6-23:00
 
 
 export CUBLAS_WORKSPACE_CONFIG=:4096:8
