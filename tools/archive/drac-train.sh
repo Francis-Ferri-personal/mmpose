@@ -1,9 +1,11 @@
 #!/bin/bash
-#SBATCH --account=def-kzn518
-#SBATCH --gpus=h100_3g.40gb:1
-#SBATCH --cpus-per-task=6
-#SBATCH --mem=140gb   
-#SBATCH --time=48:00:00
+#SBATCH --mem=64G
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=8
+#SBATCH --time=6-23  
+#SBATCH --mail-user=kzn518@usask.ca
+#SBATCH --mail-type=ALL
+#SBATCH --gres=gpu:v100l:2
 
 
 export CUBLAS_WORKSPACE_CONFIG=:4096:8
