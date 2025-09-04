@@ -74,7 +74,7 @@ pip install -v -e .
 
 
 # RUN TRAINING
-bash ./tools/train.py ${CONFIG_FILE}
+python ./tools/train.py ${CONFIG_FILE}
 
 
 # RUN EVALUATION
