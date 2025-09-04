@@ -1,7 +1,7 @@
 _base_ = ['../../../_base_/default_runtime.py']
 
 # runtime
-train_cfg = dict(max_epochs=3, val_interval=1)
+train_cfg = dict(max_epochs=300, val_interval=10)
 
 randomness = dict(seed=42, deterministic=True)
 
