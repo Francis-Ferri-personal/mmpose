@@ -90,8 +90,6 @@ model = dict(
         gfd_channels=128,
         att_channels=16, # Note: maybe 16 is too few
         gfd_inter_channels=32, # NOTE: Usual implementation =  gfd_inter_channels = gfd_channels for coord attention
-        # TODO: Try with att_channels = 32 and gfd_channels, gfd_inter_channels = 128
-        # TODO: try with att_channels = 16 and gfd_channels, gfd_inter_channels = 32
         use_bbox=False,
         rel_pos_enc_start=True, # Relative positional encoding start
         similarity_type="Cross-correlation", # 'Cosine', 'Cross-correlation', None
@@ -100,7 +98,7 @@ model = dict(
         coupled_heatmap_loss=dict(type='FocalHeatmapLoss', loss_weight=1.0),
         decoupled_heatmap_loss=dict(type='FocalHeatmapLoss', loss_weight=4.0),
         use_adaptive_wing=True,
-        adaptive_wing_loss=dict(type='AdaptiveWingLoss', loss_weight=12.0),
+        adaptive_wing_loss=dict(type='AdaptiveWingLoss', loss_weight=6.0),
         use_oks_loss=True,
         oks_loss=dict(type='OKSLoss', loss_weight=1.0),
         contrastive_loss=dict(
@@ -132,8 +130,7 @@ data_root = 'data/'
 train_pipeline = [
     dict(type='LoadImage'),
     # BottomupRandomAffine with shift_factor=0.1 and transform_mode='perspective'
-    # This transformation can move (translate/rotate/scale) the image and associated bboxes, and cause some bboxes to fall partially or completely outside the image border.
-    # NOTE: I will truncate by myself the results. I mean make the bbox be upto 0 no less. now due to the cordinate scheme of the BottomupRandomAffine I am having negative coords. 
+    # This transformation can move (translate/rotate/scale) the image and associated bboxes, and cause some bboxes to fall partially or completely outside the image border.NOTE: I truncated the results myself. That is, I'll make the bbox at most 0.
     dict(type='BottomupRandomAffine', input_size=codec['input_size']),
     dict(type='RandomFlip', direction='horizontal'),
     dict(type='GenerateTarget', encoder=codec),
