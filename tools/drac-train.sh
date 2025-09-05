@@ -71,7 +71,6 @@ mim install mmengine
 mim install "mmcv==2.1.0"
 mim install "mmdet>=3.1.0"
 pip install -r requirements.txt
-python setup.py install
 pip install -v -e .
 
 
