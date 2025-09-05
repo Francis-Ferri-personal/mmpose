@@ -51,7 +51,7 @@ git clone git@github.com:Francis-Ferri-personal/mmpose.git
 
 cd ./mmpose
 mkdir -p data/
-tar -xv --use-compress-program="pigz -d -p 4" -f $projects/Datasets/${DATASET}.tar.gz -C ./data/
+tar -x --use-compress-program="pigz -d -p 4" -f $projects/Datasets/${DATASET}.tar.gz -C ./data/
 
 
 # VIRTUAL ENVIRONMENT SETUP
@@ -74,7 +74,7 @@ pip install -v -e .
 
 
 # RUN TRAINING
-python ./tools/train.py ${CONFIG_FILE}
+python tools/train.py ${CONFIG_FILE}
 
 
 # RUN EVALUATION
