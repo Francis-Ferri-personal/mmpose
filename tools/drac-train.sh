@@ -65,7 +65,8 @@ pip install --upgrade pip
 
 # INSTALL DEPENDENCIES
 # pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu126
-pip install --no-binary torch==2.7.1 torchvision==0.22.1
+pip install torch==2.7.1+computecanada --force-reinstall
+pip install --no-binary torchvision==0.22.1+computecanada
 pip install -U openmim
 mim install mmengine
 mim install "mmcv==2.1.0"
