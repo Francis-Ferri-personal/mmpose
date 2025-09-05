@@ -6,7 +6,7 @@ numpy
 opencv-python
 pillow
 scipy
-torchvision
+# torchvision
 xtcocotools>=1.12
 einops
 seaborn
