@@ -4,6 +4,8 @@
 #SBATCH --cpus-per-task=6
 #SBATCH --mem=140gb   
 #SBATCH --time=6-23:00
+#SBATCH --mail-user=kzn518@usask.ca
+#SBATCH --mail-type=ALL
 
 
 export CUBLAS_WORKSPACE_CONFIG=:4096:8
