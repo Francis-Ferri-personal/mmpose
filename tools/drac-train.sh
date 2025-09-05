@@ -57,7 +57,7 @@ tar -x --use-compress-program="pigz -d -p 4" -f $projects/Datasets/${DATASET}.ta
 
 
 # VIRTUAL ENVIRONMENT SETUP
-module load scipy-stack gcc cuda/12.6 arrow opencv/4.10.0 python/3.10
+module load scipy-stack gcc cuda/12.6 arrow opencv/4.10.0 python/3.11
 virtualenv --no-download $SLURM_TMPDIR/.venv
 source $SLURM_TMPDIR/.venv/bin/activate
 pip install --upgrade pip
