@@ -57,7 +57,7 @@ tar -x --use-compress-program="pigz -d -p 4" -f $projects/Datasets/${DATASET}.ta
 
 
 # VIRTUAL ENVIRONMENT SETUP
-module load scipy-stack gcc cuda/12.6 arrow opencv/4.10.0 python/3.11
+module load scipy-stack gcc cuda/12.6 arrow opencv/4.10.0 python/3.10
 virtualenv --no-download $SLURM_TMPDIR/.venv
 source $SLURM_TMPDIR/.venv/bin/activate
 pip install --upgrade pip
@@ -65,13 +65,13 @@ pip install --upgrade pip
 
 # INSTALL DEPENDENCIES
 # pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu126
-pip install torch==2.7.1+computecanada --force-reinstall
-pip install --no-binary torchvision==0.22.1+computecanada
+pip install --no-binary torch torchvision
 pip install -U openmim
 mim install mmengine
 mim install "mmcv==2.1.0"
 mim install "mmdet>=3.1.0"
 pip install -r requirements.txt
+python setup.py install
 pip install -v -e .
 
 
