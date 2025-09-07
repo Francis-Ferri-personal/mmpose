@@ -68,39 +68,43 @@ pip install --upgrade pip
 pip install --no-binary torch torchvision
 pip install -U openmim
 mim install mmengine
-mim install "mmcv==2.1.0"
+mim install "mmcv>=2.0.1"
 mim install "mmdet>=3.1.0"
 pip install -r requirements.txt
 python setup.py install
 pip install -v -e .
 
 
+echo "Finalice la instalacion"
+
 # RUN TRAINING
 python tools/train.py ${CONFIG_FILE}
 
+echo "LOGRE ENTRENAR"
+
 
 # RUN EVALUATION
-CONFIG_BASENAME=$(basename "$CONFIG_FILE")
-EXPERIMENT_NAME="${CONFIG_BASENAME%.py}"
+# CONFIG_BASENAME=$(basename "$CONFIG_FILE")
+# EXPERIMENT_NAME="${CONFIG_BASENAME%.py}"
 
-MODEL_FILE=$(ls work_dirs/${EXPERIMENT_NAME}/best_coco_AP_epoch_*.pth 2>/dev/null | head -n 1)
+# MODEL_FILE=$(ls work_dirs/${EXPERIMENT_NAME}/best_coco_AP_epoch_*.pth 2>/dev/null | head -n 1)
 
-TIMESTAMP_FOLDER=$(basename $(ls -d work_dirs/${EXPERIMENT_NAME}/*/ | head -n 1))
+# TIMESTAMP_FOLDER=$(basename $(ls -d work_dirs/${EXPERIMENT_NAME}/*/ | head -n 1))
 
-# Create loss plot
-python tools/analysis_tools/analyze_logs.py plot_curve  work_dirs/${EXPERIMENT_NAME}/${TIMESTAMP_FOLDER}/vis_data/scalars.json --keys loss --legend loss --out work_dirs/${EXPERIMENT_NAME}/loss.png
+# # Create loss plot
+# python tools/analysis_tools/analyze_logs.py plot_curve  work_dirs/${EXPERIMENT_NAME}/${TIMESTAMP_FOLDER}/vis_data/scalars.json --keys loss --legend loss --out work_dirs/${EXPERIMENT_NAME}/loss.png
 
-# Metrics evaluation
-python tools/test.py ${CONFIG_FILE} ${MODEL_FILE} --work-dir work_dirs/${EXPERIMENT_NAME}/eval > work_dirs/${EXPERIMENT_NAME}/model-evaluation.txt
+# # Metrics evaluation
+# python tools/test.py ${CONFIG_FILE} ${MODEL_FILE} --work-dir work_dirs/${EXPERIMENT_NAME}/eval > work_dirs/${EXPERIMENT_NAME}/model-evaluation.txt
 
-# Performance evaluation
-python tools/analysis_tools/get_flops.py ${CONFIG_FILE} > work_dirs/${EXPERIMENT_NAME}/model-analysis.txt
+# # Performance evaluation
+# python tools/analysis_tools/get_flops.py ${CONFIG_FILE} > work_dirs/${EXPERIMENT_NAME}/model-analysis.txt
 
 
 
-# SAVE RESULTS
-mkdir -p $projects/Outputs/${DATASET}
-tar -cvf $projects/Outputs/${DATASET}/${EXPERIMENT_NAME}.tar work_dirs/${EXPERIMENT_NAME}
+# # SAVE RESULTS
+# mkdir -p $projects/Outputs/${DATASET}
+# tar -cvf $projects/Outputs/${DATASET}/${EXPERIMENT_NAME}.tar work_dirs/${EXPERIMENT_NAME}
 
 
 # RUN YOUR JOB
