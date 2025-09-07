@@ -64,8 +64,7 @@ pip install --upgrade pip
 
 
 # INSTALL DEPENDENCIES
-# pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu126
-pip install --no-binary=:all: torch torchvision
+pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu126
 pip install -U openmim
 mim install mmengine
 mim install "mmcv>=2.0.1"
