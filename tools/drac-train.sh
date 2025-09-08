@@ -64,7 +64,7 @@ pip install --upgrade pip
 
 
 # INSTALL DEPENDENCIES
-pip3 install torch==2.6.0+computecanada torchvision==0.21.0+computecanada
+pip install --no-binary torch==2.1.2+computecanada torchvision==0.16.2+computecanada
 pip install -U openmim
 mim install mmengine
 mim install "mmcv==2.1.0"
@@ -72,6 +72,7 @@ mim install "mmdet>=3.1.0"
 pip install -r requirements.txt
 python setup.py install
 pip install -v -e .
+pip3 install torch==2.6.0+computecanada torchvision==0.21.0+computecanada
 
 
 echo "Finalice la instalacion"
