@@ -18,6 +18,8 @@ from mmpose.utils.typing import (ConfigType, Features, OptConfigType,
 from ..base_head import BaseHead
 from .utils import AdaptiveRotatedConv2d, RountingFunction
 from .utils.post_processing import get_heatmaps_maximums
+from .utils.cbam import CBAM
+
 
 MODELS.register_module('DepthwiseSeparableConvModule', module=DepthwiseSeparableConvModule)
 # Reference: https://www.youtube.com/watch?v=6TtOuVJ9GBQ
@@ -671,39 +673,29 @@ class InstanceConcatenatedCoordAtt(nn.Module):
     """Coordinate Attention: embeds spatial (H,W) info into channel attention.
     """
     # TODO: Put a fix value instead of reduction
-    def __init__(self, inp, oup, inst_emb_dim=480, use_reduction=False, reduction=32, mip_channels=32):
+    def __init__(self, inp, oup, mlp_channels):
         super(InstanceConcatenatedCoordAtt, self).__init__()
         self.inp = inp # 128
         self.oup = oup # 32
-        self.inst_emb_dim = inst_emb_dim
         # NOTE: I replace this with normal implementation because it hasa non deterministic implementation
         # self.pool_h = nn.AdaptiveAvgPool2d((None, 1)) # None keeps the dimension size equal to the input width
         # self.pool_w = nn.AdaptiveAvgPool2d((1, None)) # None keeps the dimension size equal to the input height
 
-        # Channel reduction
-        mip = mip_channels
-        if use_reduction:
-            mip = max(8, inp // reduction) # max 8 ensures that it never goes below 8 channels, preventing the module from becoming too small
-
-        # Embedding instancia -> d
-        self.inst_mlp = nn.Sequential(
-            nn.Linear(inst_emb_dim, mip),
-            nn.ReLU(inplace=True)
-        )
         
-        self.conv1 = nn.Conv2d(inp + mip, mip, kernel_size=1, stride=1, padding=0)
-        self.bn1 = nn.BatchNorm2d(mip)
+        
+        self.conv1 = nn.Conv2d(inp + mlp_channels, mlp_channels, kernel_size=1, stride=1, padding=0)
+        self.bn1 = nn.BatchNorm2d(mlp_channels)
         self.act = h_swish()
         
-        self.conv_h = nn.Conv2d(mip, oup, kernel_size=1, stride=1, padding=0)
-        self.conv_w = nn.Conv2d(mip, oup, kernel_size=1, stride=1, padding=0)
+        self.conv_h = nn.Conv2d(mlp_channels, oup, kernel_size=1, stride=1, padding=0)
+        self.conv_w = nn.Conv2d(mlp_channels, oup, kernel_size=1, stride=1, padding=0)
 
         # Shortcut if input and output channels differ
         if self.inp != self.oup:
             self.shortcut = nn.Conv2d(self.inp, self.oup, kernel_size=1, stride=1, padding=0)
         
 
-    def forward(self, x, inst_feats):
+    def forward(self, x, inst_emb):
         identity = x # (b, c, 128, 128)
         n,c,h,w = x.size()
 
@@ -715,8 +707,6 @@ class InstanceConcatenatedCoordAtt(nn.Module):
         x_w = x_w.permute(0, 1, 3, 2)              # (b, c, w, 1)
 
         # embedding instance expanded
-        inst_emb = self.inst_mlp(inst_feats) # [b, d]
-        inst_emb = inst_emb.unsqueeze(-1).unsqueeze(-1) # [b, d, 1, 1]
         inst_emb_h = inst_emb.expand(-1, -1, h, 1) # [b, d, H, 1]
         inst_emb_w = inst_emb.expand(-1, -1, w, 1) # [b, d, W, 1]
 
@@ -773,6 +763,24 @@ def get_pixel_coords(heatmap_size: Tuple, device: str = 'cpu'):
         return pixel_coords
 
 
+class ConditionalChannelWeighting(nn.Module):
+    def __init__(self, in_channels, out_channels, bottleneck=16):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(in_channels, bottleneck),
+            nn.SiLU(),   # better than ReLU for preserving information
+            nn.Linear(bottleneck, out_channels),
+            nn.Sigmoid()  # normalize weights to [0,1]
+        )
+
+    def forward(self, instance_feats):
+        """
+        instance_feats: [B, in_channels] = conditional vector (e.g., instance center)
+        """
+        return self.mlp(instance_feats)  # [B, out_channels]
+        
+
+
 class CustomGFDModule(BaseModule):
     """Modification of CIDHead's GFD module
 
@@ -797,6 +805,7 @@ class CustomGFDModule(BaseModule):
         gfd_channels: int,
         att_channels: int,
         gfd_inter_channels: int,
+        concat_film_channels: int = 32, 
         clamp_delta: float = 1e-4,
         init_cfg: OptConfigType = None,
         use_bbox: bool = True,
@@ -847,33 +856,53 @@ class CustomGFDModule(BaseModule):
             # Coordinate attention without instance information
             self.coord_attention = CoordAtt(gfd_channels, gfd_inter_channels, mip_channels=att_channels)
         elif self.coord_att_type == "Concatenated":
+            # Channel reduction
+            mlp_channels = concat_film_channels
+            # Embedding instancia -> d
+            self.mlp = nn.Sequential(
+                nn.Linear(in_channels, mlp_channels),
+                nn.ReLU(inplace=True)
+            )
+
             # Coordinate attention with instance information concatenated and repeated per pixel.
             # It applies 1x1 conv in the polled h and polled w axi
             self.coord_attention = InstanceConcatenatedCoordAtt(
                 inp=gfd_channels,
                 oup=gfd_inter_channels,
-                mip_channels=att_channels)
+                mlp_channels=mlp_channels)
             
         # NOTE: These ones is not going to conditionate the coordinate attention which is bad. (Try to avoid POST and Dual)
         # TODO: We can try post coord attention film 
         # TODO: Dual-path (parallel): apply coordinate attention in one banch and apply film in annoter. COncatenate and 1x1 conv
         elif self.coord_att_type == "PreFiLM":
             self.mlp = nn.Sequential(
-                nn.Linear(in_channels, in_channels // 4),
+                nn.Linear(in_channels, gfd_channels),
                 nn.ReLU(inplace=True),
-                nn.Linear(in_channels // 4, gfd_channels),
-                # NOTE: No sigmoid here because we want to have negative values too
             )
+            # NOTE: No sigmoid here because we want to have negative values too
             self.coord_attention = CoordAtt(gfd_channels, gfd_inter_channels, mip_channels=att_channels)
         elif self.coord_att_type == "PreFiLM-Gated":
             self.mlp = nn.Sequential(
-                nn.Linear(in_channels, in_channels // 4),
-                nn.ReLU(inplace=True),
-                nn.Linear(in_channels // 4, gfd_channels),
-                nn.Sigmoid()  # escala entre 0-1
+                nn.Linear(in_channels, gfd_channels),
+                nn.ReLU(inplace=True)
             )
             self.sigmoid_gating = TruncSigmoid(min=clamp_delta, max=1 - clamp_delta)
             self.coord_attention = CoordAtt(gfd_channels, gfd_inter_channels, mip_channels=att_channels)
+        
+        elif self.coord_att_type == "CCW":
+            self.ccw = ConditionalChannelWeighting(in_channels, gfd_channels)
+            self.coord_attention = CoordAtt(gfd_channels, gfd_inter_channels, mip_channels=att_channels)
+
+        elif self.coord_att_type == "CBAM":
+            # CBAM applied on GFD features (channel -> spatial by default)
+            # You can adjust hidden_channels or reduction, and spatial_kernel if needed
+            # Example: fixed 64 hidden channels for channel MLP
+            self.cbam_attention = CBAM(
+                in_channels=gfd_channels, 
+                hidden_channels=att_channels, # or use reduction=x instead
+                spatial_kernel=7,
+                channel_first=True# standard CBAM order: channel -> spatial
+            )
         else: # None  is channel and spatial as in CiD
             self.channel_attention = ChannelAttention(gfd_channels, gfd_inter_channels)
             # TODO: we could change the spatial attention with something more advanced.
@@ -1031,7 +1060,12 @@ class CustomGFDModule(BaseModule):
             cond_instance_feats = self.coord_attention(global_feats)
             # NOTE: I am not sing relu because it can remove negative values that are valuable information from the feature map.
         elif self.coord_att_type == "Concatenated":
-            cond_instance_feats = self.coord_attention(global_feats, instance_feats)
+
+            inst_emb = self.mlp(instance_feats) # [b, d]
+            inst_emb = inst_emb.unsqueeze(-1).unsqueeze(-1) # [b, d, 1, 1]
+            cond_instance_feats = self.coord_attention(global_feats, inst_emb)
+        
+        
         elif self.coord_att_type == "PreFiLM":
             # Apply FiLM-like scaling to global features based on instance features before coordinate attention
             scale = self.mlp(instance_feats) # (b, 32)
@@ -1047,6 +1081,15 @@ class CustomGFDModule(BaseModule):
             global_feats = global_feats * inst_gate # modulated_feats  (b, 32, h, w)
             
             cond_instance_feats = self.coord_attention(global_feats)
+        
+        elif self.coord_att_type == "CCW":
+            scale = self.ccw(instance_feats)
+            scale = scale.unsqueeze(-1).unsqueeze(-1)  # (b, 32, 1, 1)
+            global_feats = global_feats * scale # modulated_feats  (b, 32, h, w)
+            cond_instance_feats = self.coord_attention(global_feats)
+        
+        elif self.coord_att_type == "CBAM":
+            cond_instance_feats = self.cbam_attention(global_feats)
         else:
             cond_instance_feats = torch.cat(
                 (self.channel_attention(global_feats, instance_feats), # i.e ([num_instances, 32, 128, 128], [instances, 480])
@@ -1086,6 +1129,7 @@ class CustomHead(BaseHead):
                  att_channels: int,
                  gfd_inter_channels: int,
                  num_keypoints: int,
+                 concat_film_channels: int = 32, 
                  prior_prob: float = 0.01,
                  use_bbox: bool =  False,
                  rel_pos_enc_start: bool = False,
@@ -1167,6 +1211,7 @@ class CustomHead(BaseHead):
             gfd_channels,
             att_channels,
             gfd_inter_channels,
+            concat_film_channels = concat_film_channels,
             init_cfg=init_cfg + [
                 dict(
                     type='Normal',
