@@ -72,7 +72,7 @@ mim install "mmdet>=3.1.0"
 pip install -r requirements.txt
 python setup.py install
 pip install -v -e .
-pip3 install torch==2.4.1+computecanada torchvision==0.17.1+computecanada
+pip3 install torch==2.4.1+computecanada torchvision==0.19.1+computecanada
 
 
 echo "Finalice la instalacion"
