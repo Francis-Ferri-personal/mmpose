@@ -816,6 +816,7 @@ class LiteHRNet(BaseBackbone):
                  norm_cfg=dict(type='BN'),
                  norm_eval=False,
                  with_cp=False,
+                 multiscale_output=False,
                  init_cfg=[
                      dict(type='Normal', std=0.001, layer=['Conv2d']),
                      dict(
@@ -829,6 +830,7 @@ class LiteHRNet(BaseBackbone):
         self.norm_cfg = norm_cfg
         self.norm_eval = norm_eval
         self.with_cp = with_cp
+        self.multiscale_output = multiscale_output
 
         self.stem = Stem(
             in_channels,
@@ -988,6 +990,9 @@ class LiteHRNet(BaseBackbone):
         if self.with_head:
             x = self.head_layer(x)
 
+        if self.multiscale_output:
+            return tuple(x)
+        
         return (x[0], )
 
     def train(self, mode=True):
