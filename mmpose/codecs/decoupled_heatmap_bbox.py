@@ -120,6 +120,7 @@ class DecoupledHeatmapBbox(DecoupledHeatmap):
         heatmap_min_overlap: float = 0.7,
         encode_max_instances: int = 30,
         bbox_format = 'x1y1x2y2', # 'ltwh', "wh"
+        only_root = False,
         **kwargs
     ):
         # Call parent constructor
@@ -136,6 +137,7 @@ class DecoupledHeatmapBbox(DecoupledHeatmap):
         self.scale_factor = (np.array(input_size) /
                              heatmap_size).astype(np.float32)
         self.bbox_format = bbox_format
+        self.only_root = only_root
 
 
     label_mapping_table = dict(
@@ -296,6 +298,9 @@ class DecoupledHeatmapBbox(DecoupledHeatmap):
             inst_areas = np.empty((0, ), dtype=np.float32)
 
 
+        if self.only_root:
+            heatmaps = heatmaps[-1:, :, :]
+        
         encoded = dict(
             instance_keypoints=inst_keypoints,
             instance_kps_visible=inst_kps_visible,
